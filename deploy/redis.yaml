@@ -27,6 +27,8 @@ metadata:
     app.kubernetes.io/part-of: ax
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: ax-redis
@@ -38,6 +40,12 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
           ports:
             - containerPort: 6379
               name: redis
@@ -48,6 +56,13 @@ spec:
             limits:
               cpu: 1000m
               memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ax-redis-data
 ---
 apiVersion: v1
 kind: Service
@@ -64,3 +79,15 @@ spec:
       name: redis
   selector:
     app.kubernetes.io/name: ax-redis
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ax-redis-data
+  namespace: ax-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

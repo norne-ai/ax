@@ -34,7 +34,7 @@ const (
 	KindWorkspace = "Workspace"
 	KindModel     = "Model"
 
-	DefaultTaskImage = "gcr.io/ax-substrate/ate-images/ax-task-runner"
+	DefaultTaskImage = "localhost:5001/ax-task-runner@sha256:3a7dcbbfc6da783286050ff56a99f4e0fbe2eb8150102a2a055b425714e5eec0"
 
 	// PhaseTerminating marks a task whose deletion has been requested and whose
 	// actor is being torn down. The record disappears once cleanup completes.
