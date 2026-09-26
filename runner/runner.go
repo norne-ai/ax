@@ -143,7 +143,11 @@ func Run(ctx context.Context, cfg Config) error {
 		_ = os.Setenv(e.GetName(), e.GetValue())
 	}
 
-	metaServer := metadata.NewServer(port, cfg.Task, workspaces, metadata.ServerOptions{WorkspacePath: wsPath})
+	metaServer := metadata.NewServer(port, cfg.Task, workspaces, metadata.ServerOptions{
+		WorkspacePath:   wsPath,
+		HTTPProxyTarget: os.Getenv("AX_HTTP_PROXY_TARGET"),
+		HTTPProxyBearer: os.Getenv("AX_HTTP_PROXY_BEARER"),
+	})
 	if err := metaServer.Start(); err != nil {
 		return fmt.Errorf("starting metadata server: %w", err)
 	}

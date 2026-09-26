@@ -17,6 +17,7 @@ The controller does not run `spec.command` as the container entrypoint. It alway
 | `AX_TASK_YAML` | The full `Task` resource as YAML, including status |
 | `AX_WORKSPACES_YAML` | Every bound `Workspace` resource as a multi-document YAML stream, in the task's binding order |
 | `spec.env` entries | Each one set directly in the container environment |
+| `spec.secretEnv` entries | Kubernetes Secret keys resolved in the task's atespace and set in the container environment |
 | `GEMINI_API_KEY` | Set when the atespace has a Gemini credential configured |
 | Volume | A durable directory mounted at `/workspace` |
 | Readiness probe | `GET /readyz` on port 80 |
@@ -38,7 +39,7 @@ The `/workspace` volume is what survives suspend and resume. Agent Substrate sna
 
 **Prepare each workspace once.** A task binds workspaces through `spec.workspaces`. For each binding, at its path, clone the Git repos from `spec.git`, create the skills path, write any MCP configuration, and run any environment bootstrap the binding asks for through its `goal`. A binding without a path lands at `/workspace/<name>`. Record that setup happened somewhere on the durable volume or in a known location, per workspace, then skip the work on later boots. Resume restarts the container, and re-cloning into a restored workspace would destroy the agent's state. The default runner writes a marker file under `/ax` for each workspace path.
 
-**Run the command and supervise it.** Start `spec.command` as a child process with the first workspace as its working directory. Give it `AX_METADATA_URL` pointing at your own HTTP server plus every `spec.env` entry. Put it in its own process group so you can signal everything it spawns.
+**Run the command and supervise it.** Start `spec.command` as a child process with the first workspace as its working directory. Give it `AX_METADATA_URL` pointing at your own HTTP server plus every `spec.env` entry; controller-resolved `spec.secretEnv` values are already inherited from the container environment. Put it in its own process group so you can signal everything it spawns.
 
 **Stay up after the command exits.** The runner is PID 1, and the container lives as long as it does. If the runner exits when the command does, the metadata server goes with it and `ax ssh` stops working. Log the exit status and keep serving until you are told to stop. The control plane does not currently read the command's exit status back from the container.
 
@@ -54,6 +55,94 @@ The `/workspace` volume is what survives suspend and resume. Agent Substrate sna
 make build-task-runner     # cross-compile for linux/amd64 and build the image
 make push-task-runner      # push it; set TASK_RUNNER_REPO to choose the registry
 ```
+
+### Local Qwen Code runner
+
+The repository also includes `Dockerfile.qwen-task-runner`, which packages the
+same AX lifecycle runner with Qwen Code. It defaults to the local
+OpenAI-compatible Responses API at
+`http://ninfer.hermes-agent.svc.cluster.local:8000/v1`, model
+`qwen3.8-27b`, with a 132,000-token context window. `OPENAI_BASE_URL`,
+`OPENAI_MODEL`, and `OPENAI_API_KEY` are ordinary task environment variables,
+so a manifest can override the baked-in local defaults without rebuilding.
+AX and Hermes use the same Kubernetes Service and single host NInfer instance.
+
+Build and push it to the kubeadm host's loopback registry, then apply the
+example task:
+
+```bash
+make push-qwen-task-runner
+make build install
+make apply-qwen-example
+ax watch task qwen-local
+```
+
+The example runs a persistent Qwen Serve daemon without a wall-time or
+session-turn cap. It uses `approvalMode: yolo` because an AX task already runs
+inside a dedicated sandbox; use a stricter mode if the workspace or image is
+not trusted. Change `AX_QWEN_PROMPT` in `examples/qwen-task.yaml` to the coding
+task you want performed.
+
+For an ad-hoc prompt, the helper script creates a uniquely named Qwen Serve
+Task backed by the private `norne-ai/experiments` repository. Create the scoped
+Git credential once in the task's atespace:
+
+```bash
+kubectl -n default create secret generic experiments-git \
+  --from-file=token=/path/to/github-token
+```
+
+Then launch an experiment without putting the token in the prompt or Task:
+
+```bash
+scripts/run-qwen-task.sh --experiment parser-benchmark --watch \
+  "Build and verify the parser benchmark"
+
+# Multiline prompts and automation can use stdin.
+printf '%s\n' "Review this implementation" | \
+  scripts/run-qwen-task.sh --experiment parser-review
+
+# Or load the prompt from a file.
+scripts/run-qwen-task.sh --experiment parser-benchmark \
+  --prompt-file task-prompt.md --watch
+
+# Select the model reasoning effort for this task only.
+scripts/run-qwen-task.sh --experiment quick-check \
+  --reasoning-effort low "Run the focused verification"
+```
+
+`--reasoning-effort` writes a task-local Qwen Code
+`model.generationConfig.extra_body.reasoning.effort` setting. This forwards the
+effort without Qwen's optional reasoning-summary request, which the local
+NInfer endpoint does not expose. Accepted values are `none`, `low`, `medium`,
+and `xhigh`; omit the option to retain the Qwen/NInfer default. The equivalent
+environment override is `AX_QWEN_REASONING_EFFORT`.
+
+The workspace is checked out before Qwen starts. The launcher creates a unique
+`qwen/<experiment>-<timestamp>` branch, constrains new code to
+`runs/<experiment>/`, and instructs Qwen to commit and push that branch. The
+runner uses Git's askpass protocol for both the private checkout and Qwen's
+later pushes, so the token is not written to `.git/config` or the remote URL.
+
+The default persistent Qwen daemon submits the initial prompt and exposes its
+Web Shell through AX (`--serve` may still be passed explicitly):
+
+```bash
+scripts/run-qwen-task.sh --serve --prompt-file task-prompt.md
+ax qwen-ui <task-name> --host 0.0.0.0
+# Open http://norne:8787 and keep the command running.
+```
+
+The bridge forwards HTTP, SSE, and WebSocket traffic through `atenet-router`
+while adding the task-routing header. Qwen's bearer stays inside the task and
+is injected by the runner's internal proxy. The default bind is the safer
+`127.0.0.1`; passing `--host 0.0.0.0` exposes the UI to the LAN and grants code
+execution access to anyone who can reach that port. Use `--port` when port 8787
+is already occupied.
+
+With `--headless`, Qwen's stream-JSON output is saved in the durable workspace
+at `/workspace/qwen-output.jsonl` and can be followed with `ax ssh` using the
+command printed by the script. Use `--dry-run` to inspect the generated Task.
 
 ## Replacing the default runner
 
@@ -170,7 +259,7 @@ Once the image is built, the fastest end-to-end check is a task with `debug: tru
 - Reads `AX_TASK_YAML` and `AX_WORKSPACES_YAML`
 - Serves `/healthz` and `/readyz` on port 80, with `/readyz` returning `503` until every workspace is ready
 - Prepares each workspace exactly once across restarts and resumes, at its own path
-- Starts `spec.command` in the first workspace with `AX_METADATA_URL` and `spec.env`
+- Starts `spec.command` in the first workspace with `AX_METADATA_URL`, `spec.env`, and resolved `spec.secretEnv`
 - Keeps running after the command exits
 - Forwards `SIGTERM` to the command's process group and exits after a grace period
 - Serves guest gRPC services on port 80 only when `spec.debug` is true

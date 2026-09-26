@@ -1,0 +1,17 @@
+{
+  "$version": 4,
+  "security": {
+    "auth": {
+      "selectedType": "openai-responses"
+    }
+  },
+  "model": {
+    "name": "qwen3.8-27b",
+    "generationConfig": {
+      "contextWindowSize": 132000
+    }
+  },
+  "tools": {
+    "approvalMode": "yolo"
+  }
+}

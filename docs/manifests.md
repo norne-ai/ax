@@ -51,6 +51,25 @@ spec:
 
 Each entry is set up independently at its own path, in order. Every entry needs a `name`; without a `path` it lands at `/workspace/<name>`, and paths must be unique. The first entry is the working directory of `spec.command`, and the task reports `WorkspaceReady` only once all of them are prepared. See [`examples/multi-workspace.yaml`](../examples/multi-workspace.yaml) for a complete set.
 
+Tasks can expose Kubernetes Secret keys as environment variables without
+putting their values in the Task manifest. The Secret must be in the namespace
+named by the task's `metadata.atespace`; the controller resolves it before
+workspace setup, so private Git repositories can use the credential while
+cloning:
+
+```yaml
+spec:
+  secretEnv:
+    - name: GITHUB_TOKEN
+      secretKeyRef:
+        name: experiments-git
+        key: token
+```
+
+If a referenced Secret or key is missing or empty, AX fails the task with a
+`SecretResolutionFailed` condition instead of starting it without the
+credential. A secret environment name cannot duplicate an entry in `spec.env`.
+
 ## Workspace
 
 ```yaml

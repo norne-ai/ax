@@ -91,11 +91,20 @@ message TaskSpec {
   // debug enables the in-container guest services (process execution and file
   // access) that back `ax ssh`. Off by default.
   bool debug = 10;
+  // secret_env maps Kubernetes Secret keys in the task's atespace to
+  // container environment variables. Secret values are resolved by the
+  // controller and are never stored in the Task resource.
+  repeated SecretEnvVar secret_env = 11;
 }
 
 message EnvVar {
   string name = 1;
   string value = 2;
+}
+
+message SecretEnvVar {
+  string name = 1;
+  SecretKeyRef secret_key_ref = 2;
 }
 
 message ResourceReqs {
@@ -384,4 +393,3 @@ message DeleteModelRequest {
 }
 
 message DeleteModelResponse {}
-

@@ -411,6 +411,30 @@ func TestValidateTask(t *testing.T) {
 	}{
 		{name: "nil spec"},
 		{name: "no workspaces", spec: &v1alpha1.TaskSpec{}},
+		{
+			name: "valid secret environment",
+			spec: &v1alpha1.TaskSpec{SecretEnv: []*v1alpha1.SecretEnvVar{{
+				Name: "GITHUB_TOKEN", SecretKeyRef: &v1alpha1.SecretKeyRef{Name: "git", Key: "token"},
+			}}},
+		},
+		{
+			name:    "secret environment missing name",
+			spec:    &v1alpha1.TaskSpec{SecretEnv: []*v1alpha1.SecretEnvVar{{SecretKeyRef: &v1alpha1.SecretKeyRef{Name: "git", Key: "token"}}}},
+			wantErr: "spec.secretEnv[0]: name is required",
+		},
+		{
+			name:    "secret environment missing reference key",
+			spec:    &v1alpha1.TaskSpec{SecretEnv: []*v1alpha1.SecretEnvVar{{Name: "GITHUB_TOKEN", SecretKeyRef: &v1alpha1.SecretKeyRef{Name: "git"}}}},
+			wantErr: "spec.secretEnv[0].secretKeyRef: key is required",
+		},
+		{
+			name: "secret environment conflicts with literal environment",
+			spec: &v1alpha1.TaskSpec{
+				Env:       []*v1alpha1.EnvVar{{Name: "GITHUB_TOKEN", Value: "literal"}},
+				SecretEnv: []*v1alpha1.SecretEnvVar{{Name: "GITHUB_TOKEN", SecretKeyRef: &v1alpha1.SecretKeyRef{Name: "git", Key: "token"}}},
+			},
+			wantErr: `environment variable "GITHUB_TOKEN" is declared more than once`,
+		},
 		{name: "list of one", spec: &v1alpha1.TaskSpec{Workspaces: []*v1alpha1.WorkspaceRef{{Name: "a"}}}},
 		{
 			name:    "nameless entry with path",
@@ -495,5 +519,38 @@ spec:
 	}
 	if !proto.Equal(&task, &back) {
 		t.Errorf("round trip changed the task:\n%s", out)
+	}
+}
+
+func TestTask_SecretEnv_YAML(t *testing.T) {
+	taskYAML := `
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: private-repo
+spec:
+  secretEnv:
+    - name: AX_GIT_TOKEN
+      secretKeyRef:
+        name: experiments-git
+        key: token
+`
+	var task v1alpha1.Task
+	if err := yaml.Unmarshal([]byte(taskYAML), &task); err != nil {
+		t.Fatalf("unmarshaling task: %v", err)
+	}
+	envs := task.GetSpec().GetSecretEnv()
+	if len(envs) != 1 || envs[0].GetName() != "AX_GIT_TOKEN" {
+		t.Fatalf("secretEnv = %#v", envs)
+	}
+	if ref := envs[0].GetSecretKeyRef(); ref.GetName() != "experiments-git" || ref.GetKey() != "token" {
+		t.Fatalf("secretKeyRef = %#v", ref)
+	}
+	out, err := yaml.Marshal(&task)
+	if err != nil {
+		t.Fatalf("marshaling task: %v", err)
+	}
+	if !strings.Contains(string(out), "secretEnv:") || !strings.Contains(string(out), "secretKeyRef:") {
+		t.Fatalf("secret references missing from YAML:\n%s", out)
 	}
 }

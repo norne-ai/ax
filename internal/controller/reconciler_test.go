@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +27,9 @@ import (
 	"github.com/google/ax/internal/substrate"
 	"github.com/google/ax/pkg/apis/v1alpha1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type mockControlServer struct {
@@ -39,7 +42,28 @@ type mockControlServer struct {
 	createdPolicies  []string
 	deletedActors    []string
 	actorTemplates   map[string]bool
+	createdTemplates []*ateapipb.ActorTemplate
 	deletedTemplates []string
+}
+
+func (m *mockControlServer) GetActorTemplate(ctx context.Context, req *ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+	name := req.GetActorTemplate().GetName()
+	for _, tmpl := range m.createdTemplates {
+		if tmpl.GetMetadata().GetName() == name {
+			return tmpl, nil
+		}
+	}
+	return nil, status.Error(codes.NotFound, "actor template not found")
+}
+
+func (m *mockControlServer) CreateActorTemplate(ctx context.Context, req *ateapipb.CreateActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+	tmpl := req.GetActorTemplate()
+	m.createdTemplates = append(m.createdTemplates, tmpl)
+	if m.actorTemplates == nil {
+		m.actorTemplates = make(map[string]bool)
+	}
+	m.actorTemplates[tmpl.GetMetadata().GetName()] = true
+	return tmpl, nil
 }
 
 // noSecrets is a SecretResolver for tests: it never finds a key and never touches a cluster.
@@ -224,6 +248,68 @@ func TestTaskReconciler(t *testing.T) {
 	}
 	if len(mockSrv.createdPolicies) != 1 || mockSrv.createdPolicies[0] != "test-task" {
 		t.Errorf("expected egress policy created for 'test-task', got %v", mockSrv.createdPolicies)
+	}
+}
+
+func TestTaskReconciler_ResolvesSecretEnvironment(t *testing.T) {
+	ctx := context.Background()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer lis.Close()
+
+	mockSrv := &mockControlServer{}
+	grpcServer := grpc.NewServer()
+	ateapipb.RegisterControlServer(grpcServer, mockSrv)
+	go grpcServer.Serve(lis)
+	defer grpcServer.Stop()
+
+	client, err := substrate.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to create substrate client: %v", err)
+	}
+	defer client.Close()
+
+	reconciler := controller.NewTaskReconciler(client, "test-template", "ax-system")
+	reconciler.WorkspaceReadyTimeout = 10 * time.Millisecond
+	reconciler.SecretResolver = func(_ context.Context, namespace, name, key string) (string, error) {
+		if namespace == "default" && name == "experiments-git" && key == "token" {
+			return "github-secret-value", nil
+		}
+		return "", nil
+	}
+	task := &v1alpha1.Task{
+		ApiVersion: v1alpha1.APIVersion,
+		Kind:       v1alpha1.KindTask,
+		Metadata:   &v1alpha1.ObjectMeta{Name: "private-git", Atespace: "default"},
+		Spec: &v1alpha1.TaskSpec{
+			Image: "runner:test",
+			SecretEnv: []*v1alpha1.SecretEnvVar{{
+				Name:         "AX_GIT_TOKEN",
+				SecretKeyRef: &v1alpha1.SecretKeyRef{Name: "experiments-git", Key: "token"},
+			}},
+		},
+	}
+
+	if _, err := reconciler.Reconcile(ctx, task, nil); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+	if len(mockSrv.createdTemplates) != 1 {
+		t.Fatalf("created templates = %d, want 1", len(mockSrv.createdTemplates))
+	}
+	env := make(map[string]string)
+	for _, item := range mockSrv.createdTemplates[0].GetContainers()[0].GetEnv() {
+		env[item.GetName()] = item.GetValue()
+	}
+	if got := env["AX_GIT_TOKEN"]; got != "github-secret-value" {
+		t.Fatalf("AX_GIT_TOKEN = %q, want resolved secret", got)
+	}
+	if strings.Contains(env["AX_TASK_YAML"], "github-secret-value") {
+		t.Fatal("resolved secret leaked into AX_TASK_YAML")
+	}
+	if !strings.Contains(env["AX_TASK_YAML"], "experiments-git") {
+		t.Fatal("AX_TASK_YAML does not contain the secret reference")
 	}
 }
 

@@ -63,7 +63,7 @@ type TaskReconciler struct {
 	defaultTemplate         string
 	defaultTemplateAtespace string
 
-	// SecretResolver resolves the Gemini API key for task containers. It defaults
+	// SecretResolver resolves Kubernetes Secret keys for task containers. It defaults
 	// to the Kubernetes secret lookup; tests replace it to avoid touching a cluster.
 	SecretResolver SecretResolver
 
@@ -151,6 +151,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, task *v1alpha1.Task, gat
 
 	if geminiKey := r.lookupGeminiKey(ctx, atespace); geminiKey != "" {
 		extraEnv[geminiSecretKey] = geminiKey
+	}
+	secretEnv, secretErr := r.resolveSecretEnv(ctx, atespace, task.Spec.GetSecretEnv())
+	if secretErr != nil {
+		r.setNotReady(task, "SecretResolutionFailed", secretErr.Error(), now)
+		task.Status.Phase = "Failed"
+		return task, secretErr
+	}
+	for name, value := range secretEnv {
+		extraEnv[name] = value
 	}
 
 	// Inject Task YAML specification into container environment
@@ -382,6 +391,35 @@ func (r *TaskReconciler) lookupGeminiKey(ctx context.Context, atespace string) s
 		return key
 	}
 	return ""
+}
+
+// resolveSecretEnv resolves every Task secret reference before an actor is
+// created. A missing secret is fatal: starting with an absent credential would
+// make private workspace setup fail later with a much less useful Git error.
+func (r *TaskReconciler) resolveSecretEnv(ctx context.Context, atespace string, envs []*v1alpha1.SecretEnvVar) (map[string]string, error) {
+	resolved := make(map[string]string, len(envs))
+	for i, env := range envs {
+		if env == nil || env.GetSecretKeyRef() == nil {
+			return nil, fmt.Errorf("spec.secretEnv[%d] is invalid", i)
+		}
+		ref := env.GetSecretKeyRef()
+		if r.SecretResolver == nil {
+			return nil, fmt.Errorf("cannot resolve spec.secretEnv[%d] %q: no secret resolver is configured", i, env.GetName())
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, secretLookupTimeout)
+		value, err := r.SecretResolver(lookupCtx, atespace, ref.GetName(), ref.GetKey())
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("resolving spec.secretEnv[%d] %q from Kubernetes Secret %s/%s key %q: %w",
+				i, env.GetName(), atespace, ref.GetName(), ref.GetKey(), err)
+		}
+		if value == "" {
+			return nil, fmt.Errorf("Kubernetes Secret %s/%s key %q for spec.secretEnv[%d] %q is empty",
+				atespace, ref.GetName(), ref.GetKey(), i, env.GetName())
+		}
+		resolved[env.GetName()] = value
+	}
+	return resolved, nil
 }
 
 // taskTemplateName derives the per-task ActorTemplate name from the task name and a

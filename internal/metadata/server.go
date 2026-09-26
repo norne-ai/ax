@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -47,6 +49,14 @@ type Server struct {
 type ServerOptions struct {
 	WorkspacePath string
 	LogDir        string
+	// HTTPProxyTarget receives HTTP requests that do not match the runner's
+	// health or metadata endpoints. This lets an agent UI share port 80 with
+	// the runner and guest gRPC service.
+	HTTPProxyTarget string
+	// HTTPProxyBearer is injected into proxied requests and is never returned
+	// to the caller. It is intended for a loopback agent daemon such as Qwen
+	// Serve whose API must remain authenticated inside the task.
+	HTTPProxyBearer string
 }
 
 // NewServer creates a new metadata and guest server serving the task and its
@@ -98,6 +108,29 @@ func NewServer(port int, task *v1alpha1.Task, workspaces []*v1alpha1.Workspace, 
 	// /metadata/v1alpha1/ax/workspaces  every bound Workspace, as a YAML stream
 	mux.HandleFunc("/metadata/v1alpha1/ax/task", s.handleTask)
 	mux.HandleFunc("/metadata/v1alpha1/ax/workspaces", s.handleWorkspaces)
+	if opt.HTTPProxyTarget != "" {
+		target, err := url.Parse(opt.HTTPProxyTarget)
+		if err != nil || target.Scheme == "" || target.Host == "" {
+			slog.Error("invalid HTTP proxy target; UI proxy disabled", "target", opt.HTTPProxyTarget, "error", err)
+		} else {
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			originalDirector := proxy.Director
+			proxy.Director = func(r *http.Request) {
+				originalDirector(r)
+				// The router-only header should not escape into the agent daemon.
+				r.Header.Del("ate-target-actor")
+				if opt.HTTPProxyBearer != "" {
+					r.Header.Set("Authorization", "Bearer "+opt.HTTPProxyBearer)
+				}
+			}
+			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+				slog.Warn("agent UI proxy request failed", "path", r.URL.Path, "error", proxyErr)
+				http.Error(w, "agent UI is not ready", http.StatusBadGateway)
+			}
+			mux.Handle("/", proxy)
+			slog.Info("agent UI proxy enabled", "target", target.Redacted())
+		}
+	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.grpcServer != nil && r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {

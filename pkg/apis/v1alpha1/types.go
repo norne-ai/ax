@@ -252,6 +252,32 @@ func ValidateTask(t *Task) error {
 	if spec == nil {
 		return nil
 	}
+	envNames := make(map[string]bool, len(spec.GetEnv())+len(spec.GetSecretEnv()))
+	for _, env := range spec.GetEnv() {
+		if env != nil && env.GetName() != "" {
+			envNames[env.GetName()] = true
+		}
+	}
+	for i, env := range spec.GetSecretEnv() {
+		field := fmt.Sprintf("spec.secretEnv[%d]", i)
+		if env == nil || env.GetName() == "" {
+			return fmt.Errorf("%s: name is required", field)
+		}
+		if strings.Contains(env.GetName(), "=") {
+			return fmt.Errorf("%s: name must not contain '='", field)
+		}
+		if envNames[env.GetName()] {
+			return fmt.Errorf("%s: environment variable %q is declared more than once", field, env.GetName())
+		}
+		envNames[env.GetName()] = true
+		ref := env.GetSecretKeyRef()
+		if ref == nil || ref.GetName() == "" {
+			return fmt.Errorf("%s.secretKeyRef: secret name is required", field)
+		}
+		if ref.GetKey() == "" {
+			return fmt.Errorf("%s.secretKeyRef: key is required", field)
+		}
+	}
 	refs := spec.WorkspaceRefs()
 	paths := spec.WorkspacePaths()
 	names := make(map[string]bool, len(refs))

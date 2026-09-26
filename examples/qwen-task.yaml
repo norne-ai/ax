@@ -1,0 +1,68 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: ax.io/v1alpha1
+kind: Workspace
+metadata:
+  name: qwen-workspace
+  atespace: default
+spec:
+  git: []
+---
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: qwen-local
+  atespace: default
+spec:
+  image: "localhost:5001/ax-qwen-task-runner@sha256:fa7a497ac0a74489d6a76b222d7611925d3531562d3f990f0f03741433bd335b"
+  command:
+    - /usr/local/bin/ax-qwen-serve
+  env:
+    - name: AX_QWEN_PROMPT
+      value: "Inspect this workspace, complete the requested coding task, and verify your work."
+    # These defaults are already baked into the image. Both AX and Hermes use
+    # the shared in-cluster Service backed by the single host NInfer process.
+    - name: OPENAI_API_KEY
+      value: "ollama"
+    - name: OPENAI_BASE_URL
+      value: "http://ninfer.hermes-agent.svc.cluster.local:8000/v1"
+    - name: OPENAI_MODEL
+      value: "qwen3.8-27b"
+    # To run the same task on Alibaba Model Studio, load the Model Studio
+    # profile and name the model; the profile carries each model's endpoint, so
+    # OPENAI_BASE_URL is not needed. The API key comes from a Kubernetes Secret,
+    # never from this file. scripts/run-qwen-task.sh -m qwen3.8-max emits both.
+    #
+    #   env:
+    #     - name: QWEN_CODE_SYSTEM_SETTINGS_PATH
+    #       value: "/etc/qwen-code/settings-modelstudio.json"
+    #     - name: OPENAI_MODEL
+    #       value: "qwen3.8-max"
+    #   secretEnv:
+    #     - name: MODELSTUDIO_API_KEY
+    #       secretKeyRef:
+    #         name: modelstudio-api
+    #         key: api-key
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  workspaces:
+    - name: qwen-workspace
+      path: "/workspace"
+  debug: true

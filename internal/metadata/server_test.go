@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -200,5 +201,66 @@ func TestMetadataServer_GuestServicesRequireDebug(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected StartProcess to fail when spec.debug is false")
+	}
+}
+
+func TestMetadataServer_ProxiesUnknownHTTPRoutes(t *testing.T) {
+	var gotAuthorization, gotActorHeader, gotHost string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		gotActorHeader = r.Header.Get("ate-target-actor")
+		gotHost = r.Host
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, "event: ready\n\ndata: ok\n\n")
+	}))
+	defer upstream.Close()
+
+	task := &v1alpha1.Task{
+		Metadata: &v1alpha1.ObjectMeta{Name: "qwen-ui", Atespace: "default"},
+		Spec:     &v1alpha1.TaskSpec{},
+	}
+	srv := metadata.NewServer(9997, task, nil, metadata.ServerOptions{
+		HTTPProxyTarget: upstream.URL,
+		HTTPProxyBearer: "secret-token",
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop(context.Background())
+	time.Sleep(50 * time.Millisecond)
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:9997/session/abc/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "127.0.0.1:8787"
+	req.Header.Set("ate-target-actor", "default/qwen-ui")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxied request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected upstream status 201, got %d", resp.StatusCode)
+	}
+	if gotAuthorization != "Bearer secret-token" {
+		t.Errorf("expected injected bearer, got %q", gotAuthorization)
+	}
+	if gotActorHeader != "" {
+		t.Errorf("router header leaked to upstream: %q", gotActorHeader)
+	}
+	if gotHost != "127.0.0.1:8787" {
+		t.Errorf("browser Host was not preserved: got %q", gotHost)
+	}
+
+	// Runner-owned paths must not be sent to the UI daemon.
+	resp, err = http.Get("http://127.0.0.1:9997/healthz")
+	if err != nil {
+		t.Fatalf("healthz request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected local healthz 200, got %d", resp.StatusCode)
 	}
 }
