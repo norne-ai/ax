@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>AX sessions</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Cpath d='M8 22l8-13 8 13' stroke='%237fd1ae' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --panel: #11151d;
+  --panel-2: #151a24;
+  --line: #222a37;
+  --line-2: #2d3746;
+  --text: #e6e9ef;
+  --muted: #939cab;
+  --dim: #6d7684;
+  --accent: #7fd1ae;
+  --warn: #f0a35e;
+  --bad: #e8797f;
+  --info: #7fb2e8;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+
+header {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(11, 14, 20, .92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 22px;
+}
+.head-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+.brand .dom { font: 12px/1 var(--mono); color: var(--dim); }
+.spacer { flex: 1 1 auto; }
+
+.counts { display: flex; gap: 7px; align-items: center; }
+.pill {
+  font: 11.5px/1 var(--mono); padding: 5px 9px; border-radius: 999px;
+  border: 1px solid var(--line-2); background: var(--panel); color: var(--muted);
+  white-space: nowrap;
+}
+.pill b { color: var(--text); font-weight: 600; }
+.pill.live { border-color: #2c4a3c; color: var(--accent); }
+.pill.live b { color: var(--accent); }
+.pill.err { border-color: #5a2f33; color: var(--bad); }
+
+.controls { display: flex; gap: 8px; align-items: center; margin-top: 11px; flex-wrap: wrap; }
+input[type=search] {
+  flex: 1 1 220px; min-width: 160px;
+  background: var(--panel); border: 1px solid var(--line-2); color: var(--text);
+  border-radius: 8px; padding: 7px 11px; font: 13px var(--mono); outline: none;
+}
+input[type=search]:focus { border-color: #3d5a4c; }
+input[type=search]::placeholder { color: var(--dim); }
+button {
+  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
+  border-radius: 8px; padding: 7px 13px; font: 13px/1 inherit; font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+}
+button:hover:not(:disabled) { background: #1b2230; border-color: #3a4658; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { border-color: #2c4a3c; color: var(--accent); }
+button.primary:hover:not(:disabled) { background: #14211b; }
+
+main { padding: 20px 22px 56px; max-width: 1500px; margin: 0 auto; }
+
+.banner {
+  display: none; margin: 0 0 16px; padding: 10px 13px; border-radius: 9px;
+  border: 1px solid #5a3a2a; background: #1d1610; color: var(--warn);
+  font-size: 13px;
+}
+.banner.show { display: block; }
+.banner.bad { border-color: #5a2f33; background: #1c1214; color: var(--bad); }
+.banner code { font: 12px var(--mono); opacity: .85; }
+
+h2 {
+  margin: 22px 0 11px; font-size: 11.5px; font-weight: 600; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--dim);
+  display: flex; align-items: center; gap: 9px;
+}
+h2:first-of-type { margin-top: 0; }
+h2 .n { font: 11px/1 var(--mono); color: var(--dim); opacity: .8; }
+
+.grid {
+  display: grid; gap: 11px;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+}
+
+.card {
+  display: block; text-decoration: none; position: relative;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+  padding: 13px 14px 12px; transition: border-color .12s, background .12s, transform .12s;
+}
+.card:hover { border-color: #3a5c4b; background: var(--panel-2); transform: translateY(-1px); }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card .top { display: flex; align-items: flex-start; gap: 9px; }
+.card .name {
+  font: 13.5px/1.35 var(--mono); font-weight: 600; word-break: break-all;
+  color: var(--text); flex: 1 1 auto;
+}
+.card:hover .name { color: var(--accent); }
+.dot {
+  flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 6px;
+  background: var(--accent); box-shadow: 0 0 0 3px rgba(127, 209, 174, .13);
+}
+.dot.open { background: var(--info); box-shadow: 0 0 0 3px rgba(127, 178, 232, .13); }
+
+.meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 9px; }
+.meta span { font: 11.5px/1.4 var(--mono); color: var(--dim); }
+.meta span b { color: var(--muted); font-weight: 500; }
+
+.badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.badge {
+  font: 10.5px/1 var(--mono); letter-spacing: .04em; text-transform: uppercase;
+  padding: 4px 7px; border-radius: 5px; border: 1px solid var(--line-2);
+  color: var(--muted); background: #0e1219;
+}
+.badge.approval { border-color: #5a3a2a; color: var(--warn); background: #1a140e; }
+.badge.opened { border-color: #2c4358; color: var(--info); background: #101720; }
+.badge.cond-ok { border-color: #253d31; color: #6fae90; }
+.badge.cond-bad { border-color: #5a2f33; color: var(--bad); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  text-align: left; padding: 7px 10px; font: 11px/1 var(--mono); font-weight: 500;
+  letter-spacing: .07em; text-transform: uppercase; color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+tbody td { padding: 8px 10px; border-bottom: 1px solid #171d27; vertical-align: middle; }
+tbody tr:hover { background: var(--panel); }
+td.nm { font: 12.5px/1.4 var(--mono); }
+td.nm a { text-decoration: none; color: var(--muted); }
+td.nm a:hover { color: var(--accent); text-decoration: underline; }
+td.num { font: 12px/1.4 var(--mono); color: var(--dim); text-align: right; white-space: nowrap; }
+.phase {
+  display: inline-block; font: 10.5px/1 var(--mono); letter-spacing: .04em;
+  text-transform: uppercase; padding: 4px 7px; border-radius: 5px;
+  border: 1px solid var(--line-2); color: var(--muted); background: #0e1219;
+}
+.phase.Running { border-color: #253d31; color: var(--accent); }
+.phase.Pending { border-color: #2c4358; color: var(--info); }
+.phase.Suspended { border-color: #3a3550; color: #a99cd8; }
+.phase.Failed { border-color: #5a2f33; color: var(--bad); }
+.phase.Terminating { border-color: #5a3a2a; color: var(--warn); }
+
+.empty {
+  padding: 34px 20px; text-align: center; border: 1px dashed var(--line-2);
+  border-radius: 11px; color: var(--dim); font-size: 13.5px; background: var(--panel);
+}
+.empty code { font: 12.5px var(--mono); color: var(--muted); }
+.hidden { display: none !important; }
+
+footer {
+  max-width: 1500px; margin: 0 auto; padding: 0 22px 30px;
+  color: var(--dim); font: 11.5px/1.6 var(--mono);
+  display: flex; gap: 16px; flex-wrap: wrap;
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="head-row">
+    <div class="brand">
+      <h1>AX sessions</h1>
+      <span class="dom" id="dom"></span>
+    </div>
+    <div class="spacer"></div>
+    <div class="counts">
+      <span class="pill live"><b id="c-running">0</b> running</span>
+      <span class="pill"><b id="c-total">0</b> total</span>
+      <span class="pill" id="c-state">connecting</span>
+    </div>
+  </div>
+  <div class="controls">
+    <input type="search" id="filter" placeholder="filter by name, atespace, phase…" autocomplete="off" spellcheck="false">
+    <button class="primary" id="open-all" disabled>Open all running</button>
+    <button id="refresh">Refresh now</button>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="banner"></div>
+
+  <h2>Running <span class="n" id="n-running"></span></h2>
+  <div class="grid" id="running"></div>
+  <div class="empty hidden" id="running-empty">
+    No running tasks. Start one with
+    <code>scripts/run-qwen-task.sh</code> or <code>ax apply -f examples/qwen-task.yaml</code>.
+  </div>
+
+  <h2 id="others-h" class="hidden">Other tasks <span class="n" id="n-others"></span></h2>
+  <table id="others" class="hidden">
+    <thead>
+      <tr>
+        <th>Name</th><th>Phase</th><th>Atespace</th>
+        <th class="num">Age</th><th class="num">Tokens</th><th>Worker</th>
+      </tr>
+    </thead>
+    <tbody id="others-body"></tbody>
+  </table>
+</main>
+
+<footer>
+  <span id="f-host"></span>
+  <span id="f-updated"></span>
+  <span>Sessions open in their own tab: the Qwen Web Shell sets frame-ancestors 'none'.</span>
+</footer>
+
+<script>
+"use strict";
+
+const OPENED_KEY = "ax-dashboard.opened";
+const state = { tasks: [], filter: "", refreshMs: 3000, baseDomain: "", host: "", error: null, stale: false, fetchedAt: null };
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  dom: $("dom"), running: $("running"), runningEmpty: $("running-empty"),
+  others: $("others"), othersBody: $("others-body"), othersH: $("others-h"),
+  cRunning: $("c-running"), cTotal: $("c-total"), cState: $("c-state"),
+  nRunning: $("n-running"), nOthers: $("n-others"),
+  banner: $("banner"), filter: $("filter"), openAll: $("open-all"), refresh: $("refresh"),
+  fHost: $("f-host"), fUpdated: $("f-updated"),
+};
+
+function openedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(OPENED_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+function markOpened(name) {
+  const s = openedSet();
+  s.add(name);
+  try { localStorage.setItem(OPENED_KEY, JSON.stringify([...s].slice(-200))); } catch {}
+}
+
+// fmtAge renders a duration compactly; it re-runs every second between polls so
+// ages keep moving without a refetch.
+function fmtAge(sec) {
+  if (sec == null || sec < 0) return "—";
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+function fmtNum(n) {
+  if (!n) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function matches(t) {
+  const q = state.filter.trim().toLowerCase();
+  if (!q) return true;
+  return [t.name, t.atespace, t.phase, t.actor, t.workerIP, t.pendingAction]
+    .some((v) => v && String(v).toLowerCase().includes(q));
+}
+
+function condBadges(t) {
+  return (t.conditions || []).map((c) => {
+    const ok = String(c.status).toLowerCase() === "true";
+    const label = c.type.replace(/([a-z])([-Z0-9])/g, "$1 $2").toLowerCase();
+    const title = esc([c.reason, c.message].filter(Boolean).join(" — "));
+    return `<span class="badge ${ok ? "cond-ok" : "cond-bad"}" title="${title}">${esc(label)}</span>`;
+  }).join("");
+}
+
+function renderCard(t, opened) {
+  const badges = [];
+  if (t.pendingAction) badges.push(`<span class="badge approval" title="Waiting for approval">approval: ${esc(t.pendingAction)}</span>`);
+  if (opened) badges.push(`<span class="badge opened">tab open</span>`);
+
+  return `<a class="card" href="${esc(t.url)}" target="_blank" rel="noopener" data-name="${esc(t.name)}">
+    <div class="top">
+      <span class="dot${opened ? " open" : ""}"></span>
+      <span class="name">${esc(t.name)}</span>
+    </div>
+    <div class="meta">
+      <span>ateespace <b>${esc(t.atespace)}</b></span>
+      <span>age <b data-age="${esc(t.ageSeconds)}">${fmtAge(t.ageSeconds)}</b></span>
+      <span title="prompt / completion tokens">tok <b>${fmtNum(t.promptTokens)} / ${fmtNum(t.completionTokens)}</b></span>
+      ${t.workerIP ? `<span>worker <b>${esc(t.workerIP)}</b></span>` : ""}
+    </div>
+    ${badges.length || condBadges(t) ? `<div class="badges">${badges.join("")}${condBadges(t)}</div>` : ""}
+  </a>`;
+}
+
+function renderRow(t) {
+  const link = t.phase === "Running"
+    ? `<a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.name)}</a>`
+    : esc(t.name);
+  return `<tr>
+    <td class="nm">${link}</td>
+    <td><span class="phase ${esc(t.phase)}">${esc(t.phase)}</span></td>
+    <td class="nm" style="color:var(--dim)">${esc(t.atespace)}</td>
+    <td class="num" data-age="${esc(t.ageSeconds)}">${fmtAge(t.ageSeconds)}</td>
+    <td class="num">${fmtNum(t.promptTokens)} / ${fmtNum(t.completionTokens)}</td>
+    <td class="num">${esc(t.workerIP || "—")}</td>
+  </tr>`;
+}
+
+function render() {
+  const visible = state.tasks.filter(matches);
+  const running = visible.filter((t) => t.phase === "Running");
+  const others = visible.filter((t) => t.phase !== "Running");
+  const opened = openedSet();
+
+  els.running.innerHTML = running.map((t) => renderCard(t, opened.has(t.name))).join("");
+  els.runningEmpty.classList.toggle("hidden", running.length > 0);
+  if (!state.filter && !running.length && !state.tasks.length) {
+    els.runningEmpty.classList.remove("hidden");
+  }
+
+  const showOthers = others.length > 0;
+  els.othersH.classList.toggle("hidden", !showOthers);
+  els.others.classList.toggle("hidden", !showOthers);
+  els.othersBody.innerHTML = others.map(renderRow).join("");
+  els.nOthers.textContent = showOthers ? String(others.length) : "";
+
+  const runningAll = state.tasks.filter((t) => t.phase === "Running").length;
+  els.cRunning.textContent = String(runningAll);
+  els.cTotal.textContent = String(state.tasks.length);
+  els.nRunning.textContent = state.filter ? `${running.length}/${runningAll}` : String(runningAll);
+  els.openAll.disabled = running.length === 0;
+  els.openAll.dataset.names = JSON.stringify(running.map((t) => ({ name: t.name, url: t.url })));
+
+  const showBanner = Boolean(state.error) || state.stale;
+  els.banner.classList.toggle("show", showBanner);
+  els.banner.classList.toggle("bad", Boolean(state.error));
+  if (showBanner) {
+    els.banner.innerHTML = state.error
+      ? `Cannot reach the AX server: <code>${esc(state.error)}</code>`
+      : `Task list is stale — the AX server has not answered for a while.`;
+  }
+}
+
+// tickAges keeps displayed ages moving between polls.
+function tickAges() {
+  document.querySelectorAll("[data-age]").forEach((el) => {
+    const base = Number(el.dataset.age);
+    if (!Number.isFinite(base) || base <= 0) return;
+    const drift = state.fetchedAt ? (Date.now() - state.fetchedAt) / 1000 : 0;
+    el.textContent = fmtAge(base + drift);
+  });
+}
+
+async function load() {
+  try {
+    const res = await fetch("/api/tasks", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.tasks = data.tasks || [];
+    state.error = data.axServerError || null;
+    state.stale = Boolean(data.stale);
+    state.baseDomain = data.baseDomain || "";
+    state.host = data.dashboardHost || "";
+    if (data.refreshMs > 500) state.refreshMs = data.refreshMs;
+    state.fetchedAt = Date.now();
+    els.cState.textContent = state.error ? "degraded" : "live";
+    els.cState.classList.toggle("err", Boolean(state.error));
+    els.dom.textContent = state.baseDomain ? `*.${state.baseDomain}` : "";
+    els.fHost.textContent = state.host ? `dashboard ${state.host}` : "";
+    els.fUpdated.textContent = `updated ${new Date(state.fetchedAt).toLocaleTimeString()}`;
+  } catch (err) {
+    state.error = String(err && err.message || err);
+    els.cState.textContent = "offline";
+    els.cState.classList.add("err");
+  }
+  render();
+}
+
+let timer = null;
+function schedule() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(load, state.refreshMs);
+}
+
+// Open every visible running session. Called only from a click handler so the
+// browser treats the window.open calls as user-initiated.
+els.openAll.addEventListener("click", () => {
+  let targets = [];
+  try { targets = JSON.parse(els.openAll.dataset.names || "[]"); } catch {}
+  for (const t of targets) {
+    const w = window.open(t.url, "_blank", "noopener");
+    if (w) markOpened(t.name);
+  }
+  render();
+});
+
+els.running.addEventListener("click", (e) => {
+  const card = e.target.closest("a.card");
+  if (card && card.dataset.name) markOpened(card.dataset.name);
+});
+
+els.filter.addEventListener("input", () => { state.filter = els.filter.value; render(); });
+els.refresh.addEventListener("click", () => { load(); schedule(); });
+
+// Pause polling while the tab is hidden so a dashboard left open in the
+// background does not keep hitting the AX server.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { if (timer) clearInterval(timer); timer = null; }
+  else { load(); schedule(); }
+});
+
+render();
+load();
+schedule();
+setInterval(tickAges, 1000);
+</script>
+</body>
+</html>
