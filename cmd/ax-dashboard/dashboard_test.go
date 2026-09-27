@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,7 +103,10 @@ func TestNewConfig(t *testing.T) {
 		{name: "apex dashboard host allowed", router: "http://r:80", baseDomain: "norne", dashboardHost: "norne", wantRouter: "http://r:80"},
 		{name: "leading dot tolerated", router: "http://r:80", baseDomain: ".norne", dashboardHost: "ax.norne", wantRouter: "http://r:80"},
 		{name: "dashboard host outside base domain", router: "http://r:80", baseDomain: "norne", dashboardHost: "ax.other", wantErr: true},
-		{name: "multi label base domain rejected", router: "http://r:80", baseDomain: "norne.local", dashboardHost: "ax.norne.local", wantErr: true},
+		{name: "multi label base domain allowed", router: "http://r:80", baseDomain: "example.com", dashboardHost: "ax.example.com", wantRouter: "http://r:80"},
+		{name: "several base domains", router: "http://r:80", baseDomain: "norne,example.com", dashboardHost: "ax.norne, ax.example.com", wantRouter: "http://r:80"},
+		{name: "base domain with an invalid label", router: "http://r:80", baseDomain: "exa_mple.com", dashboardHost: "ax.norne", wantErr: true},
+		{name: "one dashboard host outside the list", router: "http://r:80", baseDomain: "norne,example.com", dashboardHost: "ax.norne,ax.other", wantErr: true},
 		{name: "empty base domain", router: "http://r:80", baseDomain: "", dashboardHost: "ax.norne", wantErr: true},
 		{name: "empty router", router: "", baseDomain: "norne", dashboardHost: "ax.norne", wantErr: true},
 		{name: "unsupported scheme", router: "grpc://r:80", baseDomain: "norne", dashboardHost: "ax.norne", wantErr: true},
@@ -152,7 +156,7 @@ func TestIsDNSLabel(t *testing.T) {
 }
 
 func TestSessionLabel(t *testing.T) {
-	d := &dashboard{cfg: &config{baseDomain: "norne", dashboardURL: "ax.norne"}}
+	d := &dashboard{cfg: &config{baseDomains: []string{"norne"}, dashHosts: []string{"ax.norne", "norne"}}}
 
 	tests := []struct {
 		host     string
@@ -180,6 +184,91 @@ func TestSessionLabel(t *testing.T) {
 				t.Errorf("sessionLabel(%q) = %q, want %q", tc.host, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestMultipleBaseDomains covers serving the LAN wildcard and a Cloudflare
+// Tunnel hostname from one deployment: both must dispatch, and session links
+// must stay in whichever domain the browser is currently using.
+func TestMultipleBaseDomains(t *testing.T) {
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Host", r.Host)
+		w.Header().Set("X-Seen-Actor", r.Header.Get(targetActorHeader))
+	}))
+	defer router.Close()
+
+	cfg, err := newConfig(":0", "ax:8080", router.URL, "norne,example.com", "ax.norne,ax.example.com", 3*time.Second, 500)
+	if err != nil {
+		t.Fatalf("newConfig: %v", err)
+	}
+	// Longest first so the more specific domain wins a match.
+	if cfg.baseDomains[0] != "example.com" || cfg.baseDomains[1] != "norne" {
+		t.Errorf("baseDomains = %v, want [example.com norne]", cfg.baseDomains)
+	}
+	// The apex of each base domain is added automatically.
+	for _, want := range []string{"ax.norne", "ax.example.com", "example.com", "norne"} {
+		if !slices.Contains(cfg.dashHosts, want) {
+			t.Errorf("dashHosts = %v, want it to include %q", cfg.dashHosts, want)
+		}
+	}
+	if got := cfg.primaryHost(); got != "ax.norne" {
+		t.Errorf("primaryHost() = %q, want ax.norne", got)
+	}
+
+	lister := listerWith(newTask("t1", "default", "Running", "t1"))
+	d := newDashboard(cfg, newTaskSource(lister, 500, 3*time.Second))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	for _, host := range []string{"ax.norne", "norne", "ax.example.com", "example.com"} {
+		rec := httptest.NewRecorder()
+		d.ServeHTTP(rec, requestFor(t, "GET", host, "/api/tasks"))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", host, rec.Code)
+			continue
+		}
+		var resp tasksResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: decoding: %v", host, err)
+		}
+		wantBase := "norne"
+		if strings.HasSuffix(host, "example.com") {
+			wantBase = "example.com"
+		}
+		if resp.BaseDomain != wantBase {
+			t.Errorf("%s: baseDomain = %q, want %q", host, resp.BaseDomain, wantBase)
+		}
+		if want := "http://t1." + wantBase + "/"; resp.Tasks[0].URL != want {
+			t.Errorf("%s: URL = %q, want %q", host, resp.Tasks[0].URL, want)
+		}
+		if resp.DashboardHost != host {
+			t.Errorf("%s: dashboardHost = %q, want the request's own host", host, resp.DashboardHost)
+		}
+	}
+
+	// Both domains reach the same actor, with Host preserved in each case.
+	for _, host := range []string{"t1.norne", "t1.example.com"} {
+		rec := httptest.NewRecorder()
+		d.ServeHTTP(rec, requestFor(t, "GET", host, "/"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", host, rec.Code)
+		}
+		if got := rec.Header().Get("X-Seen-Actor"); got != "default/t1" {
+			t.Errorf("%s: actor = %q, want default/t1", host, got)
+		}
+		if got := rec.Header().Get("X-Seen-Host"); got != host {
+			t.Errorf("%s: upstream Host = %q, want it preserved", host, got)
+		}
+	}
+
+	// A task name is still exactly one label, in either domain.
+	for _, host := range []string{"a.b.norne", "a.b.example.com"} {
+		rec := httptest.NewRecorder()
+		d.ServeHTTP(rec, requestFor(t, "GET", host, "/"))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", host, rec.Code)
+		}
 	}
 }
 

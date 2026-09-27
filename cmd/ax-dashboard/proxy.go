@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"slices"
 	"strings"
 	"time"
 )
@@ -110,27 +111,39 @@ func (d *dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *dashboard) isDashboardHost(host string) bool {
-	for _, candidate := range d.cfg.dashboardHosts() {
-		if host == candidate {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(d.cfg.dashHosts, host)
 }
 
-// sessionLabel extracts the task name from a <task-name>.<base-domain> host.
+// sessionLabel extracts the task name from a <task-name>.<base-domain> host,
+// matching against every configured base domain.
 func (d *dashboard) sessionLabel(host string) (string, bool) {
-	suffix := "." + d.cfg.baseDomain
-	if !strings.HasSuffix(host, suffix) {
-		return "", false
+	for _, base := range d.cfg.baseDomains {
+		suffix := "." + base
+		if !strings.HasSuffix(host, suffix) {
+			continue
+		}
+		label := strings.TrimSuffix(host, suffix)
+		// A task name is a single DNS-1123 label, so a hostname with another dot
+		// in it is not something this dashboard can route to an actor.
+		if strings.Contains(label, ".") || !isDNSLabel(label) {
+			continue
+		}
+		return label, true
 	}
-	label := strings.TrimSuffix(host, suffix)
-	// A task name is a single DNS-1123 label, so a hostname with another dot in
-	// it is not something this dashboard can route to an actor.
-	if strings.Contains(label, ".") || !isDNSLabel(label) {
-		return "", false
+	return "", false
+}
+
+// baseDomainFor returns the base domain a request arrived on, so that session
+// links stay in the same domain the browser is already using: the LAN wildcard
+// and a tunnel hostname both work, and neither leaks into the other.
+func (d *dashboard) baseDomainFor(host string) string {
+	host = strings.ToLower(hostOnly(host))
+	for _, base := range d.cfg.baseDomains {
+		if host == base || strings.HasSuffix(host, "."+base) {
+			return base
+		}
 	}
-	return label, true
+	return d.cfg.baseDomains[0]
 }
 
 // serveSession proxies every path on a task's hostname to that task's Web Shell.
@@ -140,7 +153,7 @@ func (d *dashboard) serveSession(w http.ResponseWriter, r *http.Request, name st
 	task, ok := d.tasks.lookup(r.Context(), name)
 	if !ok {
 		renderError(d.cfg, w, r, http.StatusNotFound, "Unknown task",
-			"There is no AX task named "+name+" in the "+d.cfg.baseDomain+" domain.",
+			"There is no AX task named "+name+" in the "+d.baseDomainFor(r.Host)+" domain.",
 			"It may have been deleted, or the AX server may be unreachable.")
 		return
 	}
@@ -165,7 +178,8 @@ func (d *dashboard) serveUnroutedHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	renderError(d.cfg, w, r, http.StatusNotFound, "Not a dashboard or session host",
-		"Hostname "+hostOnly(r.Host)+" does not match "+d.cfg.dashboardURL+" or <task-name>."+d.cfg.baseDomain+".", "")
+		"Hostname "+hostOnly(r.Host)+" does not match "+d.cfg.primaryHost()+
+			" or <task-name>.{"+strings.Join(d.cfg.baseDomains, "|")+"}.", "")
 }
 
 // serveProbe answers the liveness and readiness endpoints and reports whether
@@ -225,9 +239,10 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-// sessionURL builds the browser-facing URL for a task's Web Shell.
+// sessionURL builds the browser-facing URL for a task's Web Shell, in the same
+// base domain the request arrived on.
 func (d *dashboard) sessionURL(r *http.Request, task taskInfo) string {
-	host := strings.ToLower(task.Name) + "." + d.cfg.baseDomain
+	host := strings.ToLower(task.Name) + "." + d.baseDomainFor(r.Host)
 	if port := portOf(r.Host); port != "" && port != "80" && port != "443" {
 		host = net.JoinHostPort(host, port)
 	}

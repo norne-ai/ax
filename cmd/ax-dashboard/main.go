@@ -32,6 +32,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -46,10 +48,15 @@ type config struct {
 	listenAddr   string
 	axServerAddr string
 	routerURL    *url.URL
-	baseDomain   string
-	dashboardURL string
-	refresh      time.Duration
-	listLimit    int64
+	// baseDomains lists every parent domain a task hostname may live under, so
+	// the LAN wildcard and a Cloudflare Tunnel hostname can be served at once.
+	// Sorted longest-first so the most specific domain wins a match.
+	baseDomains []string
+	// dashHosts are the hostnames that serve the task list, including the bare
+	// apex of each base domain.
+	dashHosts []string
+	refresh   time.Duration
+	listLimit int64
 }
 
 func main() {
@@ -66,8 +73,8 @@ func main() {
 	flag.StringVar(&listenAddr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&axServerAddr, "ax-server", "ax-server.ax-system.svc.cluster.local:8080", "AX API server gRPC address")
 	flag.StringVar(&routerAddr, "router", "atenet-router.ate-system.svc.cluster.local:80", "atenet router address used to reach task actors")
-	flag.StringVar(&baseDomain, "base-domain", "norne", "parent domain; a task is served at <task-name>.<base-domain>")
-	flag.StringVar(&dashboardURL, "dashboard-host", "ax.norne", "hostname that serves the task list instead of a session")
+	flag.StringVar(&baseDomain, "base-domain", "norne", "comma-separated parent domains; a task is served at <task-name>.<domain>")
+	flag.StringVar(&dashboardURL, "dashboard-host", "ax.norne", "comma-separated hostnames that serve the task list instead of a session")
 	flag.DurationVar(&refresh, "refresh", 3*time.Second, "how often the task list is re-read from the AX server")
 	flag.Int64Var(&listLimit, "list-limit", 500, "maximum number of tasks to list from the AX server")
 	flag.Parse()
@@ -131,8 +138,8 @@ func main() {
 		"listenAddr", cfg.listenAddr,
 		"axServer", cfg.axServerAddr,
 		"router", cfg.routerURL.String(),
-		"baseDomain", cfg.baseDomain,
-		"dashboardHosts", strings.Join(cfg.dashboardHosts(), ", "),
+		"baseDomains", strings.Join(cfg.baseDomains, ", "),
+		"dashboardHosts", strings.Join(cfg.dashHosts, ", "),
 	)
 
 	httpServer := &http.Server{
@@ -169,21 +176,39 @@ func main() {
 
 // newConfig validates the raw settings and resolves them into a config.
 func newConfig(listenAddr, axServerAddr, routerAddr, baseDomain, dashboardHost string, refresh time.Duration, listLimit int64) (*config, error) {
-	baseDomain = strings.ToLower(strings.TrimSpace(baseDomain))
-	baseDomain = strings.TrimPrefix(baseDomain, ".")
-	if baseDomain == "" {
+	baseDomains := splitList(baseDomain)
+	if len(baseDomains) == 0 {
 		return nil, errors.New("base domain cannot be empty")
 	}
-	if !isDNSLabel(baseDomain) {
-		return nil, errors.New("base domain must be a single DNS label: " + baseDomain)
+	for _, domain := range baseDomains {
+		if !isDomain(domain) {
+			return nil, errors.New("base domain is not a valid hostname: " + domain)
+		}
 	}
+	// Longest first so that when one base domain is a suffix of another, the
+	// more specific one is matched first.
+	sort.SliceStable(baseDomains, func(i, j int) bool {
+		return len(baseDomains[i]) > len(baseDomains[j])
+	})
 
-	dashboardHost = strings.ToLower(strings.TrimSpace(dashboardHost))
-	if dashboardHost == "" {
+	dashHosts := splitList(dashboardHost)
+	if len(dashHosts) == 0 {
 		return nil, errors.New("dashboard host cannot be empty")
 	}
-	if !strings.HasSuffix(dashboardHost, "."+baseDomain) && dashboardHost != baseDomain {
-		return nil, errors.New("dashboard host " + dashboardHost + " is not inside base domain " + baseDomain)
+	for _, host := range dashHosts {
+		if !isDomain(host) {
+			return nil, errors.New("dashboard host is not a valid hostname: " + host)
+		}
+		if !insideAnyDomain(host, baseDomains) {
+			return nil, errors.New("dashboard host " + host + " is not inside any base domain")
+		}
+	}
+	// The bare apex of each base domain also serves the list, so http://norne/
+	// works as well as http://ax.norne/.
+	for _, domain := range baseDomains {
+		if !slices.Contains(dashHosts, domain) {
+			dashHosts = append(dashHosts, domain)
+		}
 	}
 
 	routerURL, err := parseRouterAddr(routerAddr)
@@ -202,11 +227,48 @@ func newConfig(listenAddr, axServerAddr, routerAddr, baseDomain, dashboardHost s
 		listenAddr:   listenAddr,
 		axServerAddr: strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(axServerAddr), "http://"), "https://"),
 		routerURL:    routerURL,
-		baseDomain:   baseDomain,
-		dashboardURL: dashboardHost,
+		baseDomains:  baseDomains,
+		dashHosts:    dashHosts,
 		refresh:      refresh,
 		listLimit:    listLimit,
 	}, nil
+}
+
+// splitList parses a comma-separated flag value into trimmed, lowercased,
+// non-empty entries.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		part = strings.TrimPrefix(part, ".")
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// insideAnyDomain reports whether host is the domain itself or a name under it.
+func insideAnyDomain(host string, domains []string) bool {
+	for _, domain := range domains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDomain reports whether s is one or more DNS-1123 labels separated by dots.
+func isDomain(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if !isDNSLabel(label) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseRouterAddr accepts the bare host:port form used by ATENET_ROUTER_ADDR
@@ -232,16 +294,9 @@ func parseRouterAddr(addr string) (*url.URL, error) {
 	return u, nil
 }
 
-// dashboardHosts returns every hostname that serves the task list rather than a
-// session: the configured dashboard host plus the bare base domain, so that
-// http://norne/ works as well as http://ax.norne/.
-func (c *config) dashboardHosts() []string {
-	hosts := []string{c.dashboardURL}
-	if c.dashboardURL != c.baseDomain {
-		hosts = append(hosts, c.baseDomain)
-	}
-	return hosts
-}
+// primaryHost is the first configured dashboard hostname, used for links and
+// messages where the request's own host is not usable.
+func (c *config) primaryHost() string { return c.dashHosts[0] }
 
 // hostOnly strips the port from an HTTP Host header value.
 func hostOnly(hostport string) string {

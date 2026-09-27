@@ -124,11 +124,13 @@ func (d *dashboard) serveTasksJSON(w http.ResponseWriter, r *http.Request) {
 	})
 
 	resp := tasksResponse{
-		Tasks:         views,
-		Count:         len(views),
+		Tasks: views,
+		Count: len(views),
+		// Reported in terms of the hostname being browsed, so the page renders
+		// session links in the same domain the user arrived on.
 		Running:       running,
-		BaseDomain:    d.cfg.baseDomain,
-		DashboardHost: d.cfg.dashboardURL,
+		BaseDomain:    d.baseDomainFor(r.Host),
+		DashboardHost: hostOnly(r.Host),
 		GeneratedAt:   now.UTC(),
 		// A cache older than three refresh intervals means the poller is not
 		// keeping up, so the page should say the data may be out of date rather
@@ -184,7 +186,7 @@ func renderError(cfg *config, w http.ResponseWriter, r *http.Request, status int
 		Title:  title,
 		Detail: detail,
 		Extra:  extra,
-		Home:   requestScheme(r) + "://" + cfg.dashboardURL + "/",
+		Home:   requestScheme(r) + "://" + cfg.primaryHost() + "/",
 	}
 	if err := errorPage.Execute(w, data); err != nil {
 		// The status and headers are already sent, so there is nothing useful
