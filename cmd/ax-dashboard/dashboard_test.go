@@ -353,6 +353,55 @@ func TestSessionProxySetsActorAndPreservesHost(t *testing.T) {
 	}
 }
 
+func TestSessionProxyNormalizesSelfHttpsOrigin(t *testing.T) {
+	got := make(chan string, 3)
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get("Origin")
+		_, _ = w.Write([]byte("shell"))
+	}))
+	defer router.Close()
+
+	lister := listerWith(newTask("my-task", "default", "Running", "my-task"))
+	d := newDashboard(mustConfig(t, router.URL), newTaskSource(lister, 500, 3*time.Second))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	send := func(origin string) string {
+		rec := httptest.NewRecorder()
+		req := requestFor(t, "GET", "my-task.norne", "/")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		d.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d for origin %q (body: %s)", rec.Code, origin, rec.Body.String())
+		}
+		select {
+		case o := <-got:
+			return o
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request with origin %q never reached the router", origin)
+			return ""
+		}
+	}
+
+	// A TLS-terminating proxy in front: the browser's https self-Origin must
+	// arrive as the http URL the task daemon builds from its own socket.
+	if o := send("https://my-task.norne"); o != "http://my-task.norne" {
+		t.Errorf("self https Origin forwarded as %q, want %q", o, "http://my-task.norne")
+	}
+	// LAN plain http already matches the daemon's expectation: pass through.
+	if o := send("http://my-task.norne"); o != "http://my-task.norne" {
+		t.Errorf("http Origin forwarded as %q, want it unchanged", o)
+	}
+	// Third-party origins must not be laundered into self-origins.
+	if o := send("https://evil.example.com"); o != "https://evil.example.com" {
+		t.Errorf("third-party Origin forwarded as %q, want it unchanged", o)
+	}
+}
+
 func TestSessionProxyRejectsNonRunningTask(t *testing.T) {
 	reached := false
 	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -80,6 +81,7 @@ func newSessionProxy(cfg *config) *httputil.ReverseProxy {
 			// every WebSocket upgrade. The router does not need Host, so
 			// preserving it costs nothing.
 			pr.Out.Host = pr.In.Host
+			normalizeSelfOrigin(pr)
 			if actor, ok := pr.In.Context().Value(actorKey{}).(string); ok && actor != "" {
 				pr.Out.Header.Set(targetActorHeader, actor)
 			}
@@ -92,6 +94,30 @@ func newSessionProxy(cfg *config) *httputil.ReverseProxy {
 				"The task "+host+" could not be reached through the atenet router.", err.Error())
 		},
 	}
+}
+
+// normalizeSelfOrigin rewrites an https self-Origin to http before relaying to
+// the task's qwen daemon. The daemon only strips the Origin header (and thus
+// admits the request past its CORS gate) when Origin literally equals a URL it
+// builds from its own plaintext socket — always "http://<Host>". Behind a
+// TLS-terminating proxy such as a Cloudflare tunnel, the browser correctly
+// sends "https://<host>"; same-origin by the browser's definition, the daemon
+// still reads it as a cross-origin request and answers 403. Only an Origin
+// whose authority matches the browser-visible hostname is rewritten, so true
+// third-party origins stay exactly as they are and keep being rejected.
+func normalizeSelfOrigin(pr *httputil.ProxyRequest) {
+	origin := pr.Out.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "https" {
+		return
+	}
+	if !strings.EqualFold(hostOnly(u.Host), hostOnly(pr.In.Host)) {
+		return
+	}
+	pr.Out.Header.Set("Origin", "http://"+u.Host)
 }
 
 func (d *dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
