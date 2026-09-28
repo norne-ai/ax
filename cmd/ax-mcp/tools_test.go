@@ -76,7 +76,11 @@ func enabledWrites() writesConfig {
 		atespace:     "default",
 		maxActive:    3,
 		defaultModel: "qwen3.8-flash",
-		modelCatalog: []string{"qwen3.8-max", "qwen3.8-flash"},
+		models: []allowedModel{
+			{Model: "qwen3.8-flash", Provider: "modelstudio"},
+			{Model: "qwen3.8-max", Provider: "modelstudio"},
+			{Model: "qwen3.8-27b", Provider: "ninfer"},
+		},
 	}
 }
 

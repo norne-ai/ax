@@ -97,7 +97,7 @@ func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig
 	if writes.enabled {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "ax_launch_task",
-			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, model catalog, secrets, gateway and resource limits are fixed by the operator; you only supply the experiment name, the prompt, and optionally the model and reasoning effort. Requires an operator-enabled launcher and there is a cap on concurrent assistant tasks.",
+			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, secrets, gateway and resource limits are fixed by the operator; you supply the experiment name, the prompt, and optionally the model (only these: " + writes.modelList() + ") and reasoning effort. There is a cap on concurrent assistant tasks.",
 			Annotations: &mcp.ToolAnnotations{
 				ReadOnlyHint:    false,
 				DestructiveHint: ptrFalse(),

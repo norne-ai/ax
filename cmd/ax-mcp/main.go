@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -53,12 +54,10 @@ type config struct {
 	writes          writesConfig
 }
 
-// defaultModelCatalog is the Model Studio catalog baked into the runner image;
-// the launcher only accepts ids from it unless an operator overrides the flag.
-var defaultModelCatalog = []string{
-	"qwen3.8-max", "qwen3.8-max-preview", "qwen3.8-flash",
-	"qwen3.7-plus", "qwen3.6-plus", "qwen3.7-max", "qwen3.6-flash",
-}
+// defaultWaModels is the launcher's model allowlist: only the cheap cloud
+// flash model and the local 27B may run assistant-launched tasks. Operator
+// flags can widen or narrow it; the MCP caller cannot.
+const defaultWaModels = "modelstudio=qwen3.8-flash,ninfer=qwen3.8-27b"
 
 const defaultRunnerImage = "localhost:5001/ax-qwen-task-runner@sha256:aa6d91f1f02c86e6e0437c8c9dd8f6cbb1132eb2b13610a826a7c1977427bdfa"
 
@@ -87,8 +86,8 @@ func main() {
 	flag.BoolVar(&allowWrites, "allow-writes", false, "enable the ax_launch_task and ax_delete_task mutating tools; off by default")
 	flag.StringVar(&waAtespace, "wa-atespace", "default", "atespace the assistant-launched tasks are created in; it must hold the git and model Secrets")
 	flag.StringVar(&waRunnerImage, "wa-runner-image", defaultRunnerImage, "pinned runner image the launcher always uses")
-	flag.StringVar(&waDefaultModel, "wa-default-model", "qwen3.8-flash", "model used when the caller does not name one")
-	flag.StringVar(&waModelCatalog, "wa-model-catalog", strings.Join(defaultModelCatalog, ","), "comma-separated model ids the launcher accepts")
+	flag.StringVar(&waDefaultModel, "wa-default-model", "qwen3.8-flash", "model used when the caller does not name one; must appear in --wa-models")
+	flag.StringVar(&waModelCatalog, "wa-models", defaultWaModels, "comma-separated provider=model allowlist for launched tasks")
 	flag.IntVar(&waMaxActive, "wa-max-active", 3, "maximum assistant-launched tasks allowed to be active at once")
 	flag.Parse()
 
@@ -134,7 +133,7 @@ func main() {
 	if v := os.Getenv("AX_MCP_WA_DEFAULT_MODEL"); v != "" {
 		waDefaultModel = v
 	}
-	if v := os.Getenv("AX_MCP_WA_MODEL_CATALOG"); v != "" {
+	if v := os.Getenv("AX_MCP_WA_MODELS"); v != "" {
 		waModelCatalog = v
 	}
 	if v := os.Getenv("AX_MCP_WA_MAX_ACTIVE"); v != "" {
@@ -238,7 +237,10 @@ func newConfig(listenAddr, axServerAddr string, refresh time.Duration, listLimit
 		return nil, errors.New("list limit must be at least 1")
 	}
 
-	catalog := splitCatalog(waModelCatalog)
+	models, err := parseAllowedModels(waModelCatalog)
+	if err != nil {
+		return nil, err
+	}
 	if allowWrites {
 		if waAtespace == "" {
 			return nil, errors.New("wa-atespace cannot be empty when writes are enabled")
@@ -246,11 +248,21 @@ func newConfig(listenAddr, axServerAddr string, refresh time.Duration, listLimit
 		if waRunnerImage == "" {
 			return nil, errors.New("wa-runner-image cannot be empty when writes are enabled")
 		}
-		if len(catalog) == 0 {
-			return nil, errors.New("wa-model-catalog cannot be empty when writes are enabled")
+		if len(models) == 0 {
+			return nil, errors.New("wa-models cannot be empty when writes are enabled")
 		}
-		if !containsFold(catalog, waDefaultModel) {
-			return nil, errors.New("wa-default-model " + waDefaultModel + " is not in the model catalog")
+		var def allowedModel
+		var found bool
+		for _, m := range models {
+			if strings.EqualFold(m.Model, waDefaultModel) {
+				def, found = m, true
+			}
+		}
+		if !found {
+			return nil, errors.New("wa-default-model " + waDefaultModel + " is not in the wa-models allowlist")
+		}
+		if def.Provider == "ninfer" && len(models) > 1 {
+			return nil, errors.New("wa-default-model must be a paid cloud model unless the allowlist is deliberately local-only")
 		}
 		if waMaxActive < 1 {
 			return nil, errors.New("wa-max-active must be at least 1")
@@ -269,31 +281,33 @@ func newConfig(listenAddr, axServerAddr string, refresh time.Duration, listLimit
 			atespace:     strings.TrimSpace(waAtespace),
 			maxActive:    waMaxActive,
 			defaultModel: strings.TrimSpace(waDefaultModel),
-			modelCatalog: catalog,
+			models:       models,
 		},
 	}, nil
 }
 
-// splitCatalog parses a comma-separated model list into trimmed, lowercased,
-// non-empty entries.
-func splitCatalog(value string) []string {
-	var out []string
+// parseAllowedModels parses a comma-separated provider=model allowlist.
+// Entries are lowercased; an empty list is only acceptable when writes are
+// off, which the caller checks.
+func parseAllowedModels(value string) ([]allowedModel, error) {
+	var out []allowedModel
 	for _, part := range strings.Split(value, ",") {
 		part = strings.ToLower(strings.TrimSpace(part))
-		if part != "" {
-			out = append(out, part)
+		if part == "" {
+			continue
 		}
-	}
-	return out
-}
-
-func containsFold(list []string, want string) bool {
-	for _, s := range list {
-		if strings.EqualFold(s, want) {
-			return true
+		provider, model, ok := strings.Cut(part, "=")
+		if !ok || model == "" {
+			return nil, fmt.Errorf("invalid wa-models entry %q: expected provider=model", part)
 		}
+		switch provider {
+		case "modelstudio", "ninfer":
+		default:
+			return nil, fmt.Errorf("invalid wa-models entry %q: unknown provider %q", part, provider)
+		}
+		out = append(out, allowedModel{Model: model, Provider: provider})
 	}
-	return false
+	return out, nil
 }
 
 // healthHandler reports process liveness plus task-cache state. The AX server

@@ -42,6 +42,17 @@ const (
 	modelStudioSecret    = "modelstudio-api"
 	modelStudioSecretKey = "api-key"
 
+	// ninferEndpoint is the shared local inference Service, spelled exactly
+	// as examples/qwen-task.yaml spells it. Tasks launched on it draw from
+	// the same process that answers the assistant itself, so the operator
+	// keeps them few by policy; the launcher only speaks the OpenAI-
+	// compatible API and never reads or writes NInfer configuration.
+	ninferEndpoint = "http://ninfer.hermes-agent.svc.cluster.local:8000/v1"
+	ninferKeyEnv   = "OPENAI_API_KEY"
+	// ninferPlaceholderKey matches examples/qwen-task.yaml: the local
+	// endpoint accepts any non-empty key. It is not a secret.
+	ninferPlaceholderKey = "ollama"
+
 	gitWorkspaceName   = "qwen-experiments"
 	gitWorkspaceRepo   = "https://github.com/norne-ai/experiments.git"
 	gitWorkspaceBranch = "main"
@@ -56,6 +67,12 @@ const (
 
 var experimentPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
 
+// allowedModel binds a model id the launcher may use to its provider backend.
+type allowedModel struct {
+	Model    string
+	Provider string // "modelstudio" or "ninfer"
+}
+
 // writesConfig bounds the mutating tools. Every field is operator-set (flags
 // or env); none are reachable by the MCP caller.
 type writesConfig struct {
@@ -64,16 +81,26 @@ type writesConfig struct {
 	atespace     string
 	maxActive    int
 	defaultModel string
-	modelCatalog []string
+	models       []allowedModel
 }
 
-func (w writesConfig) modelAllowed(model string) bool {
-	for _, m := range w.modelCatalog {
-		if strings.EqualFold(m, model) {
-			return true
+// findModel resolves a requested model id against the operator's allowlist.
+func (w writesConfig) findModel(model string) (allowedModel, bool) {
+	for _, m := range w.models {
+		if strings.EqualFold(m.Model, model) {
+			return m, true
 		}
 	}
-	return false
+	return allowedModel{}, false
+}
+
+// modelList renders the allowlist for tool descriptions and error messages.
+func (w writesConfig) modelList() string {
+	parts := make([]string, 0, len(w.models))
+	for _, m := range w.models {
+		parts = append(parts, m.Model+" ("+m.Provider+")")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // --- ax_launch_task ---
@@ -81,7 +108,7 @@ func (w writesConfig) modelAllowed(model string) bool {
 type launchTaskInput struct {
 	Experiment      string `json:"experiment" jsonschema:"Short kebab-case name for the run; becomes runs/<experiment>/ in the experiments repo and part of the task name. Lowercase letters, digits, dots, underscores, hyphens."`
 	Prompt          string `json:"prompt" jsonschema:"What to ask the agent to do, verbatim. The delivery rules (work under runs/<experiment>/, commit and push the branch) are appended by the server and cannot be overridden."`
-	Model           string `json:"model,omitempty" jsonschema:"Model Studio model id from the runner image catalog. Omit for the operator default."`
+	Model           string `json:"model,omitempty" jsonschema:"Model id; must be one of the operator-allowlisted models named in the tool description. Omit to use the default."`
 	ReasoningEffort string `json:"reasoningEffort,omitempty" jsonschema:"Optional reasoning effort: none, low, medium or xhigh."`
 }
 
@@ -114,10 +141,13 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 	if model == "" {
 		model = w.defaultModel
 	}
-	if !w.modelAllowed(model) {
-		return nil, launchTaskOutput{}, fmt.Errorf("model %q is not in the launcher catalog (%s)",
-			model, strings.Join(w.modelCatalog, ", "))
+	profile, allowed := w.findModel(model)
+	if !allowed {
+		return nil, launchTaskOutput{}, fmt.Errorf("model %q is not allowed; this launcher offers: %s",
+			model, w.modelList())
 	}
+	// Normalize to the allowlist's spelling before it reaches the spec.
+	model = profile.Model
 	effort := strings.ToLower(strings.TrimSpace(in.ReasoningEffort))
 	switch effort {
 	case "", "none", "low", "medium", "xhigh":
@@ -145,7 +175,7 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 
 	branch := "qwen/" + name
 	ws := experimentsWorkspace(w.atespace)
-	task := waTask(w, name, branch, experiment, prompt, model, effort, ts)
+	task := waTask(w, profile, name, branch, experiment, prompt, model, effort)
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -276,14 +306,44 @@ User task:
 %s`, branch, experiment, experiment, branch, userPrompt)
 }
 
-func waTask(w writesConfig, name, branch, experiment, prompt, model, effort string, ts int64) *v1alpha1.Task {
+// waTask renders the task spec for one allowlisted model profile. The base
+// env and the Git Secret reference are identical across providers; the
+// provider decides the endpoint, where the model key comes from, and whether
+// a settings profile is selected at all (the NInfer default is baked into the
+// runner image unchanged).
+func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prompt, model, effort string) *v1alpha1.Task {
 	env := []*v1alpha1.EnvVar{
 		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, experiment, prompt)},
-		{Name: "OPENAI_BASE_URL", Value: modelStudioEndpoint},
 		{Name: "OPENAI_MODEL", Value: model},
 		{Name: "AX_EXPERIMENT_NAME", Value: experiment},
 		{Name: "AX_GIT_BRANCH", Value: branch},
-		{Name: "QWEN_CODE_SYSTEM_SETTINGS_PATH", Value: modelStudioSettings},
+	}
+	secrets := []*v1alpha1.SecretEnvVar{
+		{Name: gitTokenEnv, SecretKeyRef: &v1alpha1.SecretKeyRef{Name: gitSecret, Key: gitSecretKey}},
+	}
+
+	switch profile.Provider {
+	case "ninfer":
+		env = append(env,
+			&v1alpha1.EnvVar{Name: "OPENAI_BASE_URL", Value: ninferEndpoint},
+			&v1alpha1.EnvVar{Name: ninferKeyEnv, Value: ninferPlaceholderKey},
+		)
+	case "modelstudio":
+		env = append(env,
+			&v1alpha1.EnvVar{Name: "OPENAI_BASE_URL", Value: modelStudioEndpoint},
+			&v1alpha1.EnvVar{Name: "QWEN_CODE_SYSTEM_SETTINGS_PATH", Value: modelStudioSettings},
+		)
+		// The key arrives as a Secret reference only: no credential value
+		// ever passes through the MCP server, let alone the model.
+		secrets = append(secrets, &v1alpha1.SecretEnvVar{
+			Name:         modelStudioKeyEnv,
+			SecretKeyRef: &v1alpha1.SecretKeyRef{Name: modelStudioSecret, Key: modelStudioSecretKey},
+		})
+	default:
+		// findModel only yields profiles built from the parsed flag, whose
+		// providers are validated there; this keeps a misparsed config from
+		// ever launching against an unintended backend.
+		panic("ax-mcp: unknown model provider " + profile.Provider)
 	}
 	if effort != "" {
 		env = append(env, &v1alpha1.EnvVar{Name: "AX_QWEN_REASONING_EFFORT", Value: effort})
@@ -292,7 +352,7 @@ func waTask(w writesConfig, name, branch, experiment, prompt, model, effort stri
 	return &v1alpha1.Task{
 		ApiVersion: "ax.io/v1alpha1",
 		Kind:       "Task",
-		Metadata:   &v1alpha1.ObjectMeta{Name: name, Atespace: w.atespace, CreationTimestamp: nil},
+		Metadata:   &v1alpha1.ObjectMeta{Name: name, Atespace: w.atespace},
 		Spec: &v1alpha1.TaskSpec{
 			Image: w.runnerImage,
 			Command: []string{
@@ -300,17 +360,12 @@ func waTask(w writesConfig, name, branch, experiment, prompt, model, effort stri
 				waPrepareScript + "exec /usr/local/bin/ax-qwen-serve",
 			},
 			Env: env,
-			// Secret references only: no credential value ever passes through
-			// the MCP server, let alone the model.
-			SecretEnv: []*v1alpha1.SecretEnvVar{
-				{Name: gitTokenEnv, SecretKeyRef: &v1alpha1.SecretKeyRef{Name: gitSecret, Key: gitSecretKey}},
-				{Name: modelStudioKeyEnv, SecretKeyRef: &v1alpha1.SecretKeyRef{Name: modelStudioSecret, Key: modelStudioSecretKey}},
-			},
 			Resources: &v1alpha1.ResourceReqs{
 				Requests: &v1alpha1.ResourceList{Cpu: "500m", Memory: "1Gi"},
 				Limits:   &v1alpha1.ResourceList{Cpu: "4", Memory: "8Gi"},
 			},
 			Workspaces: []*v1alpha1.WorkspaceRef{{Name: gitWorkspaceName, Path: "/workspace"}},
+			SecretEnv:  secrets,
 			Debug:      true,
 		},
 	}

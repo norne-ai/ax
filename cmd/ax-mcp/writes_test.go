@@ -159,7 +159,7 @@ func TestLaunchRejectsBadInput(t *testing.T) {
 		want string
 	}{
 		{"empty prompt", map[string]any{"experiment": "ok", "prompt": "  "}, "prompt is required"},
-		{"bad model", map[string]any{"experiment": "ok", "prompt": "do it", "model": "gpt-5"}, "not in the launcher catalog"},
+		{"bad model", map[string]any{"experiment": "ok", "prompt": "do it", "model": "gpt-5"}, "is not allowed"},
 		{"bad effort", map[string]any{"experiment": "ok", "prompt": "do it", "reasoningEffort": "ultra"}, "invalid reasoningEffort"},
 		{"uppercase experiment", map[string]any{"experiment": "Bad_Name", "prompt": "do it"}, "must be lowercase"},
 		// A missing required field is rejected by the MCP input schema before
@@ -204,6 +204,111 @@ func TestLaunchRespectsConcurrencyCap(t *testing.T) {
 	}
 	if len(fake.taskCalls) != 0 {
 		t.Error("no task should be created once at the cap")
+	}
+}
+
+func TestLaunchLocalModelUsesNinferProfile(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ax_launch_task",
+		Arguments: map[string]any{"experiment": "local-run", "prompt": "summarize the repo", "model": "qwen3.8-27b"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	if len(fake.taskCalls) != 1 {
+		t.Fatalf("task calls = %d, want 1", len(fake.taskCalls))
+	}
+	task := fake.taskCalls[0].GetTask()
+
+	if model, _ := envValue(task, "OPENAI_MODEL"); model != "qwen3.8-27b" {
+		t.Errorf("OPENAI_MODEL = %q", model)
+	}
+	if ep, _ := envValue(task, "OPENAI_BASE_URL"); ep != ninferEndpoint {
+		t.Errorf("endpoint = %q, want the local NInfer service", ep)
+	}
+	// Local model: key is the non-secret placeholder, and the Model Studio
+	// secret and profile must be absent.
+	if key, ok := envValue(task, ninferKeyEnv); !ok || key != ninferPlaceholderKey {
+		t.Errorf("OPENAI_API_KEY = %q/%v, want the local placeholder", key, ok)
+	}
+	if ref := secretRef(task, modelStudioKeyEnv); ref != nil {
+		t.Error("local NInfer task must not reference the Model Studio secret")
+	}
+	if _, set := envValue(task, "QWEN_CODE_SYSTEM_SETTINGS_PATH"); set {
+		t.Error("local NInfer task must not override the settings profile")
+	}
+	// The Git credential is still a Secret reference, never a value.
+	if ref := secretRef(task, gitTokenEnv); ref == nil || ref.GetName() != gitSecret {
+		t.Errorf("GITHUB_TOKEN secret ref = %+v", ref)
+	}
+}
+
+func TestLaunchPaidModelUsesModelStudioProfile(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ax_launch_task",
+		Arguments: map[string]any{"experiment": "paid-run", "prompt": "go", "model": "qwen3.8-flash"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	task := fake.taskCalls[0].GetTask()
+	if ep, _ := envValue(task, "OPENAI_BASE_URL"); ep != modelStudioEndpoint {
+		t.Errorf("endpoint = %q, want Model Studio", ep)
+	}
+	if ref := secretRef(task, modelStudioKeyEnv); ref == nil {
+		t.Error("paid model must reference the Model Studio secret")
+	}
+	if _, leaked := envValue(task, modelStudioKeyEnv); leaked {
+		t.Error("Model Studio key must not be a plaintext env var")
+	}
+}
+
+func TestWaModelsAllowlistParsing(t *testing.T) {
+	cfg, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-flash", defaultWaModels, 3)
+	if err != nil {
+		t.Fatalf("newConfig with defaults: %v", err)
+	}
+	got := cfg.writes.models
+	want := []allowedModel{
+		{Model: "qwen3.8-flash", Provider: "modelstudio"},
+		{Model: "qwen3.8-27b", Provider: "ninfer"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// A paid default is required when the allowlist is not local-only: mixing
+	// a NInfer default with a paid model would silently route to local.
+	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-27b", "modelstudio=qwen3.8-flash,ninfer=qwen3.8-27b", 3); err == nil {
+		t.Error("newConfig accepted a NInfer default while a paid model was allowlisted")
+	}
+	// But a local-only allowlist with a NInfer default is fine.
+	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-27b", "ninfer=qwen3.8-27b", 3); err != nil {
+		t.Errorf("local-only allowlist rejected: %v", err)
+	}
+	// A default not in the allowlist is rejected.
+	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-max", defaultWaModels, 3); err == nil {
+		t.Error("newConfig accepted a default model outside the allowlist")
+	}
+	// A malformed entry is rejected.
+	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-flash", "qwen3.8-flash", 3); err == nil {
+		t.Error("newConfig accepted a provider-less model entry")
 	}
 }
 
