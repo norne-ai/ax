@@ -277,7 +277,7 @@ func TestWaModelsAllowlistParsing(t *testing.T) {
 	}
 	got := cfg.writes.models
 	want := []allowedModel{
-		{Model: "qwen3.8-flash", Provider: "modelstudio"},
+		{Model: "qwen3.8-flash", Provider: "modelstudio", DefaultEffort: "medium"},
 		{Model: "qwen3.8-27b", Provider: "ninfer"},
 	}
 	if len(got) != len(want) {
@@ -309,6 +309,55 @@ func TestWaModelsAllowlistParsing(t *testing.T) {
 	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
 		true, "default", defaultRunnerImage, "qwen3.8-flash", "qwen3.8-flash", 3); err == nil {
 		t.Error("newConfig accepted a provider-less model entry")
+	}
+	// An unknown default-effort suffix is rejected.
+	if _, err := newConfig(":1", "ax:8080", 10*time.Second, 500, "norne",
+		true, "default", defaultRunnerImage, "qwen3.8-flash", "modelstudio=qwen3.8-flash:ultra", 3); err == nil {
+		t.Error("newConfig accepted an invalid effort suffix")
+	}
+}
+
+func TestLaunchDefaultAndExplicitEffort(t *testing.T) {
+	writes := enabledWrites()
+	writes.defaultModel = "qwen3.8-flash"
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, writes)
+
+	// Omitted effort -> the flash model's allowlist default (medium).
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ax_launch_task",
+		Arguments: map[string]any{"experiment": "one", "prompt": "go"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("default call: %v / %s", err, callText(res))
+	}
+	if e, ok := envValue(fake.taskCalls[0].GetTask(), "AX_QWEN_REASONING_EFFORT"); !ok || e != "medium" {
+		t.Errorf("default effort env = %q/%v, want medium", e, ok)
+	}
+
+	// Explicit effort overrides the allowlist default.
+	res, err = session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ax_launch_task",
+		Arguments: map[string]any{"experiment": "two", "prompt": "go", "reasoningEffort": "xhigh"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("explicit call: %v / %s", err, callText(res))
+	}
+	if e, _ := envValue(fake.taskCalls[1].GetTask(), "AX_QWEN_REASONING_EFFORT"); e != "xhigh" {
+		t.Errorf("explicit effort = %q, want xhigh", e)
+	}
+
+	// The local model has no allowlist default: the env stays unset and the
+	// runner's own profile decides.
+	res, err = session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ax_launch_task",
+		Arguments: map[string]any{"experiment": "three", "prompt": "go", "model": "qwen3.8-27b"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("local call: %v / %s", err, callText(res))
+	}
+	if _, set := envValue(fake.taskCalls[2].GetTask(), "AX_QWEN_REASONING_EFFORT"); set {
+		t.Error("ninfer model without an allowlist default must not set AX_QWEN_REASONING_EFFORT")
 	}
 }
 

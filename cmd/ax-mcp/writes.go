@@ -71,6 +71,10 @@ var experimentPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
 type allowedModel struct {
 	Model    string
 	Provider string // "modelstudio" or "ninfer"
+	// DefaultEffort is the reasoning effort applied when the caller does not
+	// name one; empty means the runner image's own default (very high for
+	// flash, which bills every thought).
+	DefaultEffort string
 }
 
 // writesConfig bounds the mutating tools. Every field is operator-set (flags
@@ -98,7 +102,11 @@ func (w writesConfig) findModel(model string) (allowedModel, bool) {
 func (w writesConfig) modelList() string {
 	parts := make([]string, 0, len(w.models))
 	for _, m := range w.models {
-		parts = append(parts, m.Model+" ("+m.Provider+")")
+		part := m.Model + " (" + m.Provider
+		if m.DefaultEffort != "" {
+			part += ", default effort " + m.DefaultEffort
+		}
+		parts = append(parts, part+")")
 	}
 	return strings.Join(parts, ", ")
 }
@@ -153,6 +161,9 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 	case "", "none", "low", "medium", "xhigh":
 	default:
 		return nil, launchTaskOutput{}, fmt.Errorf("invalid reasoningEffort %q: expected none, low, medium or xhigh", in.ReasoningEffort)
+	}
+	if effort == "" {
+		effort = profile.DefaultEffort
 	}
 
 	// The cap counts wa- tasks that could still burn tokens or hold a worker:

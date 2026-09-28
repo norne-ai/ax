@@ -77,7 +77,7 @@ func enabledWrites() writesConfig {
 		maxActive:    3,
 		defaultModel: "qwen3.8-flash",
 		models: []allowedModel{
-			{Model: "qwen3.8-flash", Provider: "modelstudio"},
+			{Model: "qwen3.8-flash", Provider: "modelstudio", DefaultEffort: "medium"},
 			{Model: "qwen3.8-max", Provider: "modelstudio"},
 			{Model: "qwen3.8-27b", Provider: "ninfer"},
 		},

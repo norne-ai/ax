@@ -55,9 +55,11 @@ type config struct {
 }
 
 // defaultWaModels is the launcher's model allowlist: only the cheap cloud
-// flash model and the local 27B may run assistant-launched tasks. Operator
-// flags can widen or narrow it; the MCP caller cannot.
-const defaultWaModels = "modelstudio=qwen3.8-flash,ninfer=qwen3.8-27b"
+// flash model (defaulting to medium reasoning effort instead of the image's
+// very-high, because flash bills every thought) and the local 27B may run
+// assistant-launched tasks. Operator flags can widen or narrow it; the MCP
+// caller cannot.
+const defaultWaModels = "modelstudio=qwen3.8-flash:medium,ninfer=qwen3.8-27b"
 
 const defaultRunnerImage = "localhost:5001/ax-qwen-task-runner@sha256:aa6d91f1f02c86e6e0437c8c9dd8f6cbb1132eb2b13610a826a7c1977427bdfa"
 
@@ -87,7 +89,7 @@ func main() {
 	flag.StringVar(&waAtespace, "wa-atespace", "default", "atespace the assistant-launched tasks are created in; it must hold the git and model Secrets")
 	flag.StringVar(&waRunnerImage, "wa-runner-image", defaultRunnerImage, "pinned runner image the launcher always uses")
 	flag.StringVar(&waDefaultModel, "wa-default-model", "qwen3.8-flash", "model used when the caller does not name one; must appear in --wa-models")
-	flag.StringVar(&waModelCatalog, "wa-models", defaultWaModels, "comma-separated provider=model allowlist for launched tasks")
+	flag.StringVar(&waModelCatalog, "wa-models", defaultWaModels, "comma-separated provider=model[:default-effort] allowlist for launched tasks")
 	flag.IntVar(&waMaxActive, "wa-max-active", 3, "maximum assistant-launched tasks allowed to be active at once")
 	flag.Parse()
 
@@ -286,9 +288,10 @@ func newConfig(listenAddr, axServerAddr string, refresh time.Duration, listLimit
 	}, nil
 }
 
-// parseAllowedModels parses a comma-separated provider=model allowlist.
-// Entries are lowercased; an empty list is only acceptable when writes are
-// off, which the caller checks.
+// parseAllowedModels parses a comma-separated provider=model[:effort]
+// allowlist. Entries are lowercased; an empty list is only acceptable when
+// writes are off, which the caller checks. The effort suffix sets the
+// per-model default applied when the caller does not name one.
 func parseAllowedModels(value string) ([]allowedModel, error) {
 	var out []allowedModel
 	for _, part := range strings.Split(value, ",") {
@@ -296,16 +299,25 @@ func parseAllowedModels(value string) ([]allowedModel, error) {
 		if part == "" {
 			continue
 		}
-		provider, model, ok := strings.Cut(part, "=")
-		if !ok || model == "" {
-			return nil, fmt.Errorf("invalid wa-models entry %q: expected provider=model", part)
+		provider, rest, ok := strings.Cut(part, "=")
+		if !ok || rest == "" {
+			return nil, fmt.Errorf("invalid wa-models entry %q: expected provider=model[:effort]", part)
 		}
 		switch provider {
 		case "modelstudio", "ninfer":
 		default:
 			return nil, fmt.Errorf("invalid wa-models entry %q: unknown provider %q", part, provider)
 		}
-		out = append(out, allowedModel{Model: model, Provider: provider})
+		model, effort, _ := strings.Cut(rest, ":")
+		if model == "" {
+			return nil, fmt.Errorf("invalid wa-models entry %q: empty model id", part)
+		}
+		switch effort {
+		case "", "none", "low", "medium", "xhigh":
+		default:
+			return nil, fmt.Errorf("invalid wa-models entry %q: unknown default effort %q", part, effort)
+		}
+		out = append(out, allowedModel{Model: model, Provider: provider, DefaultEffort: effort})
 	}
 	return out, nil
 }
