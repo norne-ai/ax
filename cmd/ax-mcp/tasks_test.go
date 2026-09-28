@@ -33,6 +33,13 @@ type fakeClient struct {
 	getTask   *v1alpha1.Task
 	getErr    error
 
+	// Write-path records and injected failures.
+	wsCalls     []*v1alpha1.UpdateWorkspaceRequest
+	taskCalls   []*v1alpha1.UpdateTaskRequest
+	deleteCalls []*v1alpha1.DeleteTaskRequest
+	writeErr    error
+	deleteErr   error
+
 	listCalls int
 	getCalls  int
 }
@@ -51,6 +58,30 @@ func (f *fakeClient) GetTask(_ context.Context, _ *v1alpha1.GetTaskRequest, _ ..
 		return nil, f.getErr
 	}
 	return f.getTask, nil
+}
+
+func (f *fakeClient) UpdateWorkspace(_ context.Context, in *v1alpha1.UpdateWorkspaceRequest, _ ...grpc.CallOption) (*v1alpha1.Workspace, error) {
+	f.wsCalls = append(f.wsCalls, in)
+	if f.writeErr != nil {
+		return nil, f.writeErr
+	}
+	return in.GetWorkspace(), nil
+}
+
+func (f *fakeClient) UpdateTask(_ context.Context, in *v1alpha1.UpdateTaskRequest, _ ...grpc.CallOption) (*v1alpha1.Task, error) {
+	f.taskCalls = append(f.taskCalls, in)
+	if f.writeErr != nil {
+		return nil, f.writeErr
+	}
+	return in.GetTask(), nil
+}
+
+func (f *fakeClient) DeleteTask(_ context.Context, in *v1alpha1.DeleteTaskRequest, _ ...grpc.CallOption) (*v1alpha1.DeleteTaskResponse, error) {
+	f.deleteCalls = append(f.deleteCalls, in)
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	return &v1alpha1.DeleteTaskResponse{}, nil
 }
 
 func pbTask(name, ateespace, phase string, created time.Time) *v1alpha1.Task {

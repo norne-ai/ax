@@ -50,19 +50,30 @@ func ptrFalse() *bool {
 	return &f
 }
 
+func ptrTrue() *bool {
+	t := true
+	return &t
+}
+
 type axTools struct {
 	tasks           *taskSource
 	dashboardDomain string
+	writes          writesConfig
 }
 
-// newMCPServer builds the MCP server and registers the read-only AX task
-// tools on it.
-func newMCPServer(tasks *taskSource, dashboardDomain string) *mcp.Server {
-	ax := &axTools{tasks: tasks, dashboardDomain: dashboardDomain}
+// newMCPServer builds the MCP server and registers the AX task tools on it.
+// The three read-only tools are always present; the two mutating tools are
+// registered only when the operator enabled writes, so a client can never
+// discover a tool the deployment did not opt into.
+func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig) *mcp.Server {
+	ax := &axTools{tasks: tasks, dashboardDomain: dashboardDomain, writes: writes}
 
+	instructions := "Read-only queries against the AX orchestrator on this cluster: ax_list_tasks, ax_get_task and ax_cluster_summary."
+	if writes.enabled {
+		instructions += " It can also launch a confined coding task (ax_launch_task) and delete an assistant-launched task (ax_delete_task); both are guarded and require an explicit confirm."
+	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "ax-mcp", Version: "0.1.0"}, &mcp.ServerOptions{
-		Instructions: "Read-only queries against the AX orchestrator on this cluster: " +
-			"ax_list_tasks, ax_get_task and ax_cluster_summary. Nothing here changes state.",
+		Instructions: instructions,
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -82,6 +93,30 @@ func newMCPServer(tasks *taskSource, dashboardDomain string) *mcp.Server {
 		Description: "Summarise all AX tasks on the cluster in one shot: how many are in each phase, total token usage, how many await approval, and how old the underlying task list is.",
 		Annotations: readOnly(),
 	}, ax.clusterSummary)
+
+	if writes.enabled {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ax_launch_task",
+			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, model catalog, secrets, gateway and resource limits are fixed by the operator; you only supply the experiment name, the prompt, and optionally the model and reasoning effort. Requires an operator-enabled launcher and there is a cap on concurrent assistant tasks.",
+			Annotations: &mcp.ToolAnnotations{
+				ReadOnlyHint:    false,
+				DestructiveHint: ptrFalse(),
+				IdempotentHint:  false,
+				OpenWorldHint:   ptrTrue(),
+			},
+		}, ax.launchTask)
+
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ax_delete_task",
+			Description: "Delete an assistant-launched task whose name starts with wa-. Destructive and final: the sandbox and any unpushed work are lost. The first call only reports the task and refuses; call again with confirmName equal to the name to actually delete. Tasks not launched through this server cannot be deleted here.",
+			Annotations: &mcp.ToolAnnotations{
+				ReadOnlyHint:    false,
+				DestructiveHint: ptrTrue(),
+				IdempotentHint:  false,
+				OpenWorldHint:   ptrTrue(),
+			},
+		}, ax.deleteTask)
+	}
 
 	return srv
 }

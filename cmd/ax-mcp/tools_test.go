@@ -32,8 +32,16 @@ import (
 
 // newTestSession starts the MCP endpoint over httptest with a populated task
 // cache and connects a real SDK client to it, exercising the stateless
-// Streamable HTTP handshake for every test.
+// Streamable HTTP handshake for every test. Writes are off, so only the three
+// read-only tools are registered.
 func newTestSession(t *testing.T, fake *fakeClient) (*mcp.ClientSession, *taskSource) {
+	t.Helper()
+	return newSessionWithWrites(t, fake, writesConfig{})
+}
+
+// newSessionWithWrites is newTestSession with an explicit write config, used
+// by the launch/delete tests to register the mutating tools.
+func newSessionWithWrites(t *testing.T, fake *fakeClient, writes writesConfig) (*mcp.ClientSession, *taskSource) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -42,7 +50,7 @@ func newTestSession(t *testing.T, fake *fakeClient) (*mcp.ClientSession, *taskSo
 		t.Fatalf("seed refresh: %v", err)
 	}
 
-	srv := newMCPServer(src, "norne")
+	srv := newMCPServer(src, "norne", writes)
 	httpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true},
@@ -57,6 +65,19 @@ func newTestSession(t *testing.T, fake *fakeClient) (*mcp.ClientSession, *taskSo
 	}
 	t.Cleanup(func() { session.Close() })
 	return session, src
+}
+
+// enabledWrites returns a valid write config for tests that opt into the
+// mutating tools.
+func enabledWrites() writesConfig {
+	return writesConfig{
+		enabled:      true,
+		runnerImage:  "localhost:5001/ax-qwen-task-runner@sha256:test",
+		atespace:     "default",
+		maxActive:    3,
+		defaultModel: "qwen3.8-flash",
+		modelCatalog: []string{"qwen3.8-max", "qwen3.8-flash"},
+	}
 }
 
 func decodeStructured(t *testing.T, raw any, dst any) {
@@ -284,7 +305,7 @@ func TestToolsFailWhenAXUnreachable(t *testing.T) {
 	fake := &fakeClient{listErr: status.Error(codes.Unavailable, "ax-server down")}
 	src := newTaskSource(fake, 500, time.Hour)
 
-	srv := newMCPServer(src, "norne")
+	srv := newMCPServer(src, "norne", writesConfig{})
 	httpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true},

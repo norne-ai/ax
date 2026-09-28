@@ -69,6 +69,9 @@ func (t taskInfo) problem() string {
 type taskClient interface {
 	ListTasks(ctx context.Context, in *v1alpha1.ListTasksRequest, opts ...grpc.CallOption) (*v1alpha1.ListTasksResponse, error)
 	GetTask(ctx context.Context, in *v1alpha1.GetTaskRequest, opts ...grpc.CallOption) (*v1alpha1.Task, error)
+	UpdateWorkspace(ctx context.Context, in *v1alpha1.UpdateWorkspaceRequest, opts ...grpc.CallOption) (*v1alpha1.Workspace, error)
+	UpdateTask(ctx context.Context, in *v1alpha1.UpdateTaskRequest, opts ...grpc.CallOption) (*v1alpha1.Task, error)
+	DeleteTask(ctx context.Context, in *v1alpha1.DeleteTaskRequest, opts ...grpc.CallOption) (*v1alpha1.DeleteTaskResponse, error)
 }
 
 // taskSource caches the AX task list. The AX server has no list-watch RPC and
