@@ -27,6 +27,8 @@ reasoning_effort="${AX_QWEN_REASONING_EFFORT:-}"
 atespace="${AX_ATESPACE:-default}"
 task_name=""
 experiment=""
+git_repo="${AX_GIT_REPO:-experiments}"
+git_base_branch="${AX_GIT_BASE_BRANCH:-main}"
 git_secret="${AX_EXPERIMENTS_GIT_SECRET:-experiments-git}"
 git_secret_key="${AX_EXPERIMENTS_GIT_SECRET_KEY:-token}"
 prompt=""
@@ -46,7 +48,7 @@ Launch a Qwen Code task on AX. Qwen Serve mode is the default.
 
 Usage:
   scripts/run-qwen-task.sh [options] "PROMPT"
-  scripts/run-qwen-task.sh --experiment NAME --prompt-file PATH [options]
+  scripts/run-qwen-task.sh --repo NAME --prompt-file PATH [options]
   printf '%s\n' "PROMPT" | scripts/run-qwen-task.sh [options]
 
 Options:
@@ -55,7 +57,14 @@ Options:
                         Read the prompt from PATH; use - for stdin
   -n, --name NAME      Task name (default: qwen-<unix timestamp>)
   -e, --experiment NAME
-                        Experiment directory under runs/ (required)
+                        Task-name seed; the task is named after the repository
+                        when omitted
+  -r, --repo NAME      Repository in the norne-ai GitHub organisation (accepts
+                        NAME or norne-ai/NAME; default: $AX_GIT_REPO or experiments)
+  -b, --base-branch NAME
+                        Branch to check out before creating the task branch
+                        (default: $AX_GIT_BASE_BRANCH or main; the experiments
+                        repository has no main and needs this set)
   -m, --model ID       Model to run the task on (default: qwen3.8-27b)
       --provider NAME  ninfer or modelstudio; inferred from --model when omitted
       --api-key-secret NAME
@@ -95,7 +104,8 @@ Options:
 Environment overrides:
   AX_BIN, AX_QWEN_IMAGE, AX_QWEN_ENDPOINT, AX_QWEN_MODEL, AX_QWEN_PROVIDER,
   AX_QWEN_API_KEY, AX_QWEN_REASONING_EFFORT, AX_ATESPACE, AX_PREVIEW_DOMAIN,
-  AX_MODELSTUDIO_SECRET, AX_MODELSTUDIO_SECRET_KEY,
+  AX_MODELSTUDIO_SECRET, AX_MODELSTUDIO_SECRET_KEY, AX_GIT_REPO,
+  AX_GIT_BASE_BRANCH,
   AX_EXPERIMENTS_GIT_SECRET, AX_EXPERIMENTS_GIT_SECRET_KEY
 
 Model Studio tasks read their API key from a Kubernetes Secret instead of the
@@ -159,6 +169,24 @@ while (($#)); do
       ;;
     --experiment=*)
       experiment="${1#*=}"
+      shift
+      ;;
+    -r|--repo)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      git_repo="$2"
+      shift 2
+      ;;
+    --repo=*)
+      git_repo="${1#*=}"
+      shift
+      ;;
+    -b|--base-branch)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      git_base_branch="$2"
+      shift 2
+      ;;
+    --base-branch=*)
+      git_base_branch="${1#*=}"
       shift
       ;;
     -m|--model)
@@ -327,12 +355,18 @@ if [[ -z "$prompt" ]]; then
   exit 2
 fi
 
-if [[ -z "$experiment" ]]; then
-  echo "--experiment is required; it becomes runs/<experiment> in norne-ai/experiments." >&2
-  usage >&2
+git_repo="${git_repo#norne-ai/}"
+git_repo="${git_repo%.git}"
+git_repo="${git_repo:-experiments}"
+if [[ ${#git_repo} -gt 100 || ! "$git_repo" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+  echo "Invalid repository '$git_repo': pass a repository name from the norne-ai GitHub organisation." >&2
   exit 2
 fi
-if [[ ${#experiment} -gt 80 || ! "$experiment" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]]; then
+if [[ -z "$git_base_branch" || "$git_base_branch" == -* || "$git_base_branch" == */ || "$git_base_branch" == *..* || "$git_base_branch" == *//* || "$git_base_branch" == *'@{'* || ! "$git_base_branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "Invalid base branch '$git_base_branch'." >&2
+  exit 2
+fi
+if [[ -n "$experiment" && ( ${#experiment} -gt 80 || ! "$experiment" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ) ]]; then
   echo "Invalid experiment '$experiment': use 1-80 lowercase letters, digits, dots, underscores, or hyphens." >&2
   exit 2
 fi
@@ -401,8 +435,9 @@ esac
 
 started_at="$(date +%s)"
 if [[ -z "$task_name" ]]; then
-  task_experiment="${experiment//[._]/-}"
-  task_name="qwen-${task_experiment:0:40}-$started_at"
+  task_seed="${experiment:-${git_repo,,}}"
+  task_seed="${task_seed//[._]/-}"
+  task_name="qwen-${task_seed:0:40}-$started_at"
 fi
 if [[ ${#task_name} -gt 63 || ! "$task_name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
   echo "Invalid task name '$task_name': use a lowercase DNS label of at most 63 characters." >&2
@@ -438,13 +473,12 @@ if [[ -n "$preview_port" ]]; then
   preview_note="- The app must listen on 0.0.0.0:$preview_port inside the task and keep running after you finish (for a Next.js dev server: NEXT_TELEMETRY_DISABLED=1 npx next dev -H 0.0.0.0 -p $preview_port, started in the background, with no basePath). The preview panel at $preview_url opens itself beside the chat, so confirm the app answers there before calling the work done."
 fi
 
-git_branch="qwen/$experiment-$started_at"
+git_branch="qwen/$task_name"
 prompt="$(cat <<EOF
-You are working in the norne-ai/experiments Git repository on branch $git_branch.
+You are working in the norne-ai/$git_repo Git repository on branch $git_branch, created from $git_base_branch.
 
 Mandatory delivery rules:
-- Put every new or modified project file under runs/$experiment/.
-- Do not modify files outside runs/$experiment/.
+- Work in the checked-out repository at /workspace.
 - Complete and verify the requested work.
 - Before declaring the task complete, commit all changes on $git_branch with a meaningful commit message and push that branch to origin.
 - In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.
@@ -475,7 +509,9 @@ manifest="$(
   AX_TASK_REASONING_EFFORT="$reasoning_effort" \
   AX_TASK_SERVE="$serve" \
   AX_TASK_PREVIEW_TARGET="$preview_target" \
-  AX_EXPERIMENT_NAME="$experiment" \
+  AX_GIT_REPO="$git_repo" \
+  AX_GIT_BASE_BRANCH="$git_base_branch" \
+  AX_GIT_WORKSPACE="ws-$task_name" \
   AX_GIT_BRANCH="$git_branch" \
   AX_GIT_SECRET="$git_secret" \
   AX_GIT_SECRET_KEY="$git_secret_key" \
@@ -493,7 +529,6 @@ if git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
 else
   git switch -c "$AX_GIT_BRANCH"
 fi
-mkdir -p "runs/$AX_EXPERIMENT_NAME"
 '''
 if serve:
     command = ["bash", "-lc", prepare + "exec /usr/local/bin/ax-qwen-serve"]
@@ -511,14 +546,14 @@ workspace = {
     "apiVersion": "ax.io/v1alpha1",
     "kind": "Workspace",
     "metadata": {
-        "name": "qwen-experiments",
+        "name": os.environ["AX_GIT_WORKSPACE"],
         "atespace": os.environ["AX_TASK_ATESPACE"],
     },
     "spec": {
         "git": [{
             "name": "origin",
-            "repo": "https://github.com/norne-ai/experiments.git",
-            "branch": "main",
+            "repo": "https://github.com/norne-ai/" + os.environ["AX_GIT_REPO"] + ".git",
+            "branch": os.environ["AX_GIT_BASE_BRANCH"],
             "dir": ".",
         }],
     },
@@ -528,7 +563,6 @@ env = [
     {"name": "AX_QWEN_PROMPT", "value": os.environ["AX_TASK_PROMPT"]},
     {"name": "OPENAI_BASE_URL", "value": os.environ["AX_TASK_ENDPOINT"]},
     {"name": "OPENAI_MODEL", "value": os.environ["AX_TASK_MODEL"]},
-    {"name": "AX_EXPERIMENT_NAME", "value": os.environ["AX_EXPERIMENT_NAME"]},
     {"name": "AX_GIT_BRANCH", "value": os.environ["AX_GIT_BRANCH"]},
 ]
 
@@ -587,7 +621,7 @@ task = {
             "requests": {"cpu": "500m", "memory": "1Gi"},
             "limits": {"cpu": "4", "memory": "8Gi"},
         },
-        "workspaces": [{"name": "qwen-experiments", "path": "/workspace"}],
+        "workspaces": [{"name": os.environ["AX_GIT_WORKSPACE"], "path": "/workspace"}],
         "debug": True,
     },
 }
@@ -631,7 +665,8 @@ Model: $model
 Inference endpoint: $endpoint
 Model API key: $key_source
 Reasoning effort: ${reasoning_effort:-default}
-Experiment path: runs/$experiment
+Repository: norne-ai/$git_repo
+Base branch: $git_base_branch
 Git branch: $git_branch
 Preview app: ${preview_url:-not requested (pass --preview)}
 

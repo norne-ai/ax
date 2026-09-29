@@ -100,32 +100,40 @@ not trusted. Change `AX_QWEN_PROMPT` in `examples/qwen-task.yaml` to the coding
 task you want performed.
 
 For an ad-hoc prompt, the helper script creates a uniquely named Qwen Serve
-Task backed by the private `norne-ai/experiments` repository. Create the scoped
-Git credential once in the task's atespace:
+Task that checks out a repository you name, from the private `norne-ai` GitHub
+organisation. `--repo` takes a bare repository name (or `norne-ai/<name>`) and
+rejects URLs and other organisations, so the injected credential can never be
+aimed at a remote the operator did not approve. Omit it and the task runs in
+`norne-ai/experiments`. Create the scoped Git credential once in the task's
+atespace:
 
 ```bash
 kubectl -n default create secret generic experiments-git \
   --from-file=token=/path/to/github-token
 ```
 
-Then launch an experiment without putting the token in the prompt or Task:
+Then launch a task without putting the token in the prompt or Task:
 
 ```bash
-scripts/run-qwen-task.sh --experiment parser-benchmark --watch \
+scripts/run-qwen-task.sh --repo work-coordinator --experiment parser-benchmark --watch \
   "Build and verify the parser benchmark"
 
 # Multiline prompts and automation can use stdin.
 printf '%s\n' "Review this implementation" | \
-  scripts/run-qwen-task.sh --experiment parser-review
+  scripts/run-qwen-task.sh --repo work-coordinator --experiment parser-review
 
-# Or load the prompt from a file.
-scripts/run-qwen-task.sh --experiment parser-benchmark \
+# Or load the prompt from a file, based on a branch other than main.
+scripts/run-qwen-task.sh --repo work-coordinator --base-branch experiment/wa-observer \
   --prompt-file task-prompt.md --watch
 
 # Select the model reasoning effort for this task only.
-scripts/run-qwen-task.sh --experiment quick-check \
+scripts/run-qwen-task.sh --repo work-coordinator --experiment quick-check \
   --reasoning-effort low "Run the focused verification"
 ```
+
+`--repo` and `--experiment` are both optional: an omitted repository is
+`norne-ai/experiments`, and an omitted experiment seed names the task after the
+repository instead.
 
 `--reasoning-effort` writes a task-local Qwen Code
 `model.generationConfig.extra_body.reasoning.effort` setting. This forwards the
@@ -134,17 +142,23 @@ NInfer endpoint does not expose. Accepted values are `none`, `low`, `medium`,
 and `xhigh`; omit the option to retain the Qwen/NInfer default. The equivalent
 environment override is `AX_QWEN_REASONING_EFFORT`.
 
-The workspace is checked out before Qwen starts. The launcher creates a unique
-`qwen/<experiment>-<timestamp>` branch, constrains new code to
-`runs/<experiment>/`, and instructs Qwen to commit and push that branch. The
-runner uses Git's askpass protocol for both the private checkout and Qwen's
-later pushes, so the token is not written to `.git/config` or the remote URL.
+Each task gets its own workspace object holding the chosen repository, checked
+out at `--base-branch` (default `main`) before Qwen starts. `norne-ai/experiments`
+has no `main` branch, so a task that should build on it must say
+`--base-branch experiment/wa-observer`; without that, the clone fetches a branch
+that does not exist and Qwen starts in an empty workspace. The launcher creates
+a unique `qwen/<task-name>` branch from it and hands Qwen the whole repository,
+instructing it to commit and push that branch. The runner uses Git's askpass
+protocol for both the private checkout and Qwen's later pushes, so the token is
+not written to `.git/config` or the remote URL. Deleting a task through the AX
+MCP server reclaims that per-task workspace; workspaces an operator mounted by
+hand are left alone.
 
 The default persistent Qwen daemon submits the initial prompt and exposes its
 Web Shell through AX (`--serve` may still be passed explicitly):
 
 ```bash
-scripts/run-qwen-task.sh --serve --prompt-file task-prompt.md
+scripts/run-qwen-task.sh --repo work-coordinator --serve --prompt-file task-prompt.md
 ax qwen-ui <task-name> --host 0.0.0.0
 # Open http://norne:8787 and keep the command running.
 ```

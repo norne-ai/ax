@@ -28,11 +28,16 @@ import (
 )
 
 // The write path deliberately mirrors scripts/run-qwen-task.sh in Model Studio
-// serve mode: one pinned runner image, one Git workspace, the experiment's
-// runs/<name>/ confinement, and credentials that arrive only as Kubernetes
-// Secret references. The MCP client can supply text, never a spec.
+// serve mode: one pinned runner image, a caller-selected repository restricted
+// to the norne-ai GitHub organisation and defaulting to norne-ai/experiments,
+// and credentials that arrive only as Kubernetes Secret references. The MCP
+// client can supply intent, never a raw AX spec or an arbitrary credential
+// destination.
 const (
 	waPrefix = "wa-"
+	// wsPrefix names the workspace each launched task owns, so deleting a task
+	// can reclaim exactly its own workspaces and never a shared one.
+	wsPrefix = "ws-"
 
 	// modelStudioEndpoint is the Alibaba Token Plan compatible-mode endpoint
 	// the runner image's Model Studio profile is written against.
@@ -53,13 +58,20 @@ const (
 	// endpoint accepts any non-empty key. It is not a secret.
 	ninferPlaceholderKey = "ollama"
 
-	gitWorkspaceName   = "qwen-experiments"
-	gitWorkspaceRepo   = "https://github.com/norne-ai/experiments.git"
-	gitWorkspaceBranch = "main"
-	gitTokenEnv        = "GITHUB_TOKEN"
-	gitSecret          = "experiments-git"
-	gitSecretKey       = "token"
-	previewTarget      = "http://127.0.0.1:3000"
+	gitHubOrg     = "norne-ai"
+	gitTokenEnv   = "GITHUB_TOKEN"
+	gitSecret     = "experiments-git"
+	gitSecretKey  = "token"
+	previewTarget = "http://127.0.0.1:3000"
+
+	// defaultRepository is the target when the caller names none, and
+	// defaultBaseBranch is the branch when it names none. The workspace layer
+	// resolves an unnamed branch to "main" itself (internal/workspace
+	// defaultBranch), so this is the only place that decision is spelled.
+	// Repositories whose default branch is not main - norne-ai/experiments is
+	// one - need baseBranch from the caller.
+	defaultRepository = "experiments"
+	defaultBaseBranch = "main"
 
 	maxPromptChars   = 8000
 	maxExperimentLen = 80
@@ -67,6 +79,8 @@ const (
 )
 
 var experimentPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
+var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+var branchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // allowedModel binds a model id the launcher may use to its provider backend.
 type allowedModel struct {
@@ -115,8 +129,10 @@ func (w writesConfig) modelList() string {
 // --- ax_launch_task ---
 
 type launchTaskInput struct {
-	Experiment      string `json:"experiment" jsonschema:"Short kebab-case name for the run; becomes runs/<experiment>/ in the experiments repo and part of the task name. Lowercase letters, digits, dots, underscores, hyphens."`
-	Prompt          string `json:"prompt" jsonschema:"What to ask the agent to do, verbatim. The delivery rules (work under runs/<experiment>/, commit and push the branch) are appended by the server and cannot be overridden."`
+	Repository      string `json:"repository,omitempty" jsonschema:"GitHub repository name in the norne-ai organisation (for example work-coordinator). Omit to target norne-ai/experiments. Do not include a URL."`
+	BaseBranch      string `json:"baseBranch,omitempty" jsonschema:"Branch to check out before creating the task branch. Defaults to main; set it for any repository whose default branch is not main (norne-ai/experiments is one)."`
+	Experiment      string `json:"experiment" jsonschema:"Short task key used in the AX task name. Lowercase letters, digits, dots, underscores, hyphens."`
+	Prompt          string `json:"prompt" jsonschema:"What to ask the agent to do, verbatim. Repository-wide delivery, verification, commit and push rules are appended by the server and cannot be overridden."`
 	Model           string `json:"model,omitempty" jsonschema:"Model id; must be one of the operator-allowlisted models named in the tool description. Omit to use the default."`
 	ReasoningEffort string `json:"reasoningEffort,omitempty" jsonschema:"Optional reasoning effort: none, low, medium or xhigh."`
 	Preview         *bool  `json:"preview,omitempty" jsonschema:"Preview is enabled when omitted. Set false only for a non-web task. When enabled, the app must listen on 0.0.0.0:3000 and the Web Shell opens a hot-reloading preview panel automatically."`
@@ -127,6 +143,8 @@ type launchTaskOutput struct {
 	Atespace    string `json:"atespace"`
 	Phase       string `json:"phase"`
 	Branch      string `json:"branch"`
+	Repository  string `json:"repository"`
+	BaseBranch  string `json:"baseBranch"`
 	Experiment  string `json:"experiment"`
 	Model       string `json:"model"`
 	WebShell    string `json:"webShell,omitempty"`
@@ -137,6 +155,14 @@ type launchTaskOutput struct {
 
 func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in launchTaskInput) (*mcp.CallToolResult, launchTaskOutput, error) {
 	w := ax.writes
+	repository, err := validateRepository(in.Repository)
+	if err != nil {
+		return nil, launchTaskOutput{}, err
+	}
+	baseBranch, err := validateBaseBranch(in.BaseBranch)
+	if err != nil {
+		return nil, launchTaskOutput{}, err
+	}
 	experiment, slug, err := validateExperiment(in.Experiment)
 	if err != nil {
 		return nil, launchTaskOutput{}, err
@@ -188,14 +214,15 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 	}
 
 	branch := "qwen/" + name
-	ws := experimentsWorkspace(w.atespace)
+	workspaceName := wsPrefix + name
+	ws := repositoryWorkspace(w.atespace, workspaceName, repository, baseBranch)
 	preview := in.Preview == nil || *in.Preview
-	task := waTask(w, profile, name, branch, experiment, prompt, model, effort, preview)
+	task := waTask(w, profile, name, workspaceName, branch, repository, baseBranch, prompt, model, effort, preview)
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if _, err := ax.tasks.client.UpdateWorkspace(callCtx, &v1alpha1.UpdateWorkspaceRequest{Workspace: ws}); err != nil {
-		return nil, launchTaskOutput{}, fmt.Errorf("updating workspace %s: %w", gitWorkspaceName, err)
+		return nil, launchTaskOutput{}, fmt.Errorf("updating workspace %s: %w", workspaceName, err)
 	}
 	created, err := ax.tasks.client.UpdateTask(callCtx, &v1alpha1.UpdateTaskRequest{Task: task}, grpc.WaitForReady(false))
 	if err != nil {
@@ -208,17 +235,19 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 		slog.Warn("post-launch task list refresh failed", "task", name, "error", err)
 	}
 
-	slog.Info("launched assistant task", "name", name, "atespace", w.atespace, "branch", branch, "model", model, "effort", effort, "promptChars", len(prompt))
+	slog.Info("launched assistant task", "name", name, "atespace", w.atespace, "repository", repository, "baseBranch", baseBranch, "branch", branch, "model", model, "effort", effort, "promptChars", len(prompt))
 
 	out := launchTaskOutput{
 		Name:        name,
 		Atespace:    w.atespace,
 		Phase:       created.GetStatus().GetPhase(),
 		Branch:      branch,
+		Repository:  gitHubOrg + "/" + repository,
+		BaseBranch:  baseBranch,
 		Experiment:  experiment,
 		Model:       model,
 		ActiveTasks: len(active) + 1,
-		Note:        "The agent will commit its work and push branch " + branch + " to norne-ai/experiments before declaring completion.",
+		Note:        "The agent will commit its work and push branch " + branch + " to " + gitHubOrg + "/" + repository + " before declaring completion.",
 	}
 	if ax.dashboardDomain != "" {
 		out.WebShell = "http://" + name + "." + ax.dashboardDomain
@@ -234,6 +263,32 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 		out.Note += " The Web Shell will open the app preview from " + out.PreviewURL + "."
 	}
 	return nil, out, nil
+}
+
+func validateRepository(raw string) (string, error) {
+	repository := strings.TrimSpace(raw)
+	repository = strings.TrimPrefix(repository, gitHubOrg+"/")
+	repository = strings.TrimSuffix(repository, ".git")
+	if repository == "" {
+		return defaultRepository, nil
+	}
+	if len(repository) > 100 || !repositoryPattern.MatchString(repository) {
+		return "", fmt.Errorf("repository %q must be a repository name in the %s GitHub organisation", raw, gitHubOrg)
+	}
+	return repository, nil
+}
+
+func validateBaseBranch(raw string) (string, error) {
+	branch := strings.TrimSpace(raw)
+	if branch == "" {
+		branch = defaultBaseBranch
+	}
+	if strings.HasPrefix(branch, "-") || strings.HasSuffix(branch, "/") ||
+		strings.Contains(branch, "..") || strings.Contains(branch, "//") ||
+		strings.Contains(branch, "@{") || !branchPattern.MatchString(branch) {
+		return "", fmt.Errorf("invalid baseBranch %q", raw)
+	}
+	return branch, nil
 }
 
 // validateExperiment checks the raw name and derives the DNS-label-safe slug
@@ -287,24 +342,23 @@ func activeWaTasks(tasks []taskInfo) []string {
 	return names
 }
 
-func experimentsWorkspace(atespace string) *v1alpha1.Workspace {
+func repositoryWorkspace(atespace, workspaceName, repository, baseBranch string) *v1alpha1.Workspace {
 	return &v1alpha1.Workspace{
 		ApiVersion: "ax.io/v1alpha1",
 		Kind:       "Workspace",
-		Metadata:   &v1alpha1.ObjectMeta{Name: gitWorkspaceName, Atespace: atespace},
+		Metadata:   &v1alpha1.ObjectMeta{Name: workspaceName, Atespace: atespace},
 		Spec: &v1alpha1.WorkspaceSpec{
 			Git: []*v1alpha1.GitRepo{{
 				Name:   "origin",
-				Repo:   gitWorkspaceRepo,
-				Branch: gitWorkspaceBranch,
+				Repo:   "https://github.com/" + gitHubOrg + "/" + repository + ".git",
+				Branch: baseBranch,
 				Dir:    ".",
 			}},
 		},
 	}
 }
 
-// waPrepareScript recreates the checked-out branch and confines new work to
-// runs/<experiment>/, exactly as scripts/run-qwen-task.sh does.
+// waPrepareScript recreates the task branch in the selected repository.
 const waPrepareScript = `set -euo pipefail
 git config --global user.name "${AX_GIT_AUTHOR_NAME:-Norne Qwen}"
 git config --global user.email "${AX_GIT_AUTHOR_EMAIL:-qwen@norne.local}"
@@ -314,26 +368,24 @@ if git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
 else
   git switch -c "$AX_GIT_BRANCH"
 fi
-mkdir -p "runs/$AX_EXPERIMENT_NAME"
 `
 
-func wrappedPrompt(branch, experiment, userPrompt string, preview bool) string {
+func wrappedPrompt(branch, repository, baseBranch, userPrompt string, preview bool) string {
 	previewNote := ""
 	if preview {
 		previewNote = `
 - The app must listen on 0.0.0.0:3000 inside the task and keep running after you finish. For Next.js, use NEXT_TELEMETRY_DISABLED=1 npx next dev -H 0.0.0.0 -p 3000 in the background, with no basePath. The preview panel opens itself beside the chat; confirm the app answers on http://127.0.0.1:3000 before calling the work done.`
 	}
-	return fmt.Sprintf(`You are working in the norne-ai/experiments Git repository on branch %s.
+	return fmt.Sprintf(`You are working in the %s/%s Git repository on branch %s, created from %s.
 
 Mandatory delivery rules:
-- Put every new or modified project file under runs/%s/.
-- Do not modify files outside runs/%s/.
+- Work in the checked-out repository at /workspace.
 - Complete and verify the requested work.
 - Before declaring the task complete, commit all changes on %s with a meaningful commit message and push that branch to origin.
 - In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.%s
 
 User task:
-%s`, branch, experiment, experiment, branch, previewNote, userPrompt)
+%s`, gitHubOrg, repository, branch, baseBranch, branch, previewNote, userPrompt)
 }
 
 // waTask renders the task spec for one allowlisted model profile. The base
@@ -341,11 +393,10 @@ User task:
 // provider decides the endpoint, where the model key comes from, and whether
 // a settings profile is selected at all (the NInfer default is baked into the
 // runner image unchanged).
-func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prompt, model, effort string, preview bool) *v1alpha1.Task {
+func waTask(w writesConfig, profile allowedModel, name, workspaceName, branch, repository, baseBranch, prompt, model, effort string, preview bool) *v1alpha1.Task {
 	env := []*v1alpha1.EnvVar{
-		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, experiment, prompt, preview)},
+		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, repository, baseBranch, prompt, preview)},
 		{Name: "OPENAI_MODEL", Value: model},
-		{Name: "AX_EXPERIMENT_NAME", Value: experiment},
 		{Name: "AX_GIT_BRANCH", Value: branch},
 	}
 	secrets := []*v1alpha1.SecretEnvVar{
@@ -400,7 +451,7 @@ func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prom
 				Requests: &v1alpha1.ResourceList{Cpu: "500m", Memory: "1Gi"},
 				Limits:   &v1alpha1.ResourceList{Cpu: "4", Memory: "8Gi"},
 			},
-			Workspaces: []*v1alpha1.WorkspaceRef{{Name: gitWorkspaceName, Path: "/workspace"}},
+			Workspaces: []*v1alpha1.WorkspaceRef{{Name: workspaceName, Path: "/workspace"}},
 			SecretEnv:  secrets,
 			Debug:      true,
 		},
@@ -419,6 +470,12 @@ type deleteTaskOutput struct {
 	NeedsConfirmation bool      `json:"needsConfirmation"`
 	Reason            string    `json:"reason,omitempty"`
 	Task              *taskItem `json:"task,omitempty"`
+	// CleanedWorkspaces lists the per-task workspaces reclaimed with the task,
+	// so a caller can see the launcher left no workspace objects behind.
+	CleanedWorkspaces []string `json:"cleanedWorkspaces,omitempty"`
+	// CleanupWarning is non-empty when the task was deleted but some workspace
+	// survived it, naming what an operator must remove by hand.
+	CleanupWarning string `json:"cleanupWarning,omitempty"`
 }
 
 func (ax *axTools) deleteTask(ctx context.Context, _ *mcp.CallToolRequest, in deleteTaskInput) (*mcp.CallToolResult, deleteTaskOutput, error) {
@@ -451,13 +508,52 @@ func (ax *axTools) deleteTask(ctx context.Context, _ *mcp.CallToolRequest, in de
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+
+	// The workspaces to reclaim are read from the live spec before the task is
+	// deleted, because the spec is the only record of what it actually mounted.
+	var cleanupWarnings []string
+	live, err := ax.tasks.client.GetTask(callCtx, &v1alpha1.GetTaskRequest{Atespace: info.Atespace, Name: info.Name}, grpc.WaitForReady(false))
+	if err != nil {
+		slog.Warn("pre-delete task detail lookup failed", "task", info.Name, "error", err)
+		cleanupWarnings = append(cleanupWarnings, fmt.Sprintf("could not read the task spec, so its workspaces were not checked: %v", err))
+	}
+
 	if _, err := ax.tasks.client.DeleteTask(callCtx, &v1alpha1.DeleteTaskRequest{Atespace: info.Atespace, Name: info.Name}, grpc.WaitForReady(false)); err != nil {
 		return nil, deleteTaskOutput{}, fmt.Errorf("deleting task %s: %w", info.Name, err)
 	}
+
+	var cleaned []string
+	for _, workspaceName := range ownedWorkspaces(live) {
+		if _, err := ax.tasks.client.DeleteWorkspace(callCtx, &v1alpha1.DeleteWorkspaceRequest{Atespace: info.Atespace, Name: workspaceName}, grpc.WaitForReady(false)); err != nil {
+			slog.Warn("workspace cleanup failed", "task", info.Name, "workspace", workspaceName, "error", err)
+			cleanupWarnings = append(cleanupWarnings, fmt.Sprintf("workspace %s survived and must be deleted with the ax CLI: %v", workspaceName, err))
+			continue
+		}
+		cleaned = append(cleaned, workspaceName)
+	}
+
 	if err := ax.tasks.refresh(ctx); err != nil {
 		slog.Warn("post-delete task list refresh failed", "task", info.Name, "error", err)
 	}
 
-	slog.Info("deleted assistant task", "name", info.Name, "atespace", info.Atespace, "phase", info.Phase, "ageSeconds", item.AgeSeconds)
-	return nil, deleteTaskOutput{Deleted: true, Task: &item}, nil
+	slog.Info("deleted assistant task", "name", info.Name, "atespace", info.Atespace, "phase", info.Phase, "ageSeconds", item.AgeSeconds, "workspacesDeleted", len(cleaned))
+	return nil, deleteTaskOutput{
+		Deleted:           true,
+		Task:              &item,
+		CleanedWorkspaces: cleaned,
+		CleanupWarning:    strings.Join(cleanupWarnings, "; "),
+	}, nil
+}
+
+// ownedWorkspaces returns the workspaces a task alone used. The launcher names
+// them ws-<task>, so any other name - the shared workspace tasks launched
+// before this launcher, or one an operator mounted into several tasks - stays.
+func ownedWorkspaces(task *v1alpha1.Task) []string {
+	var names []string
+	for _, ref := range task.GetSpec().GetWorkspaces() {
+		if strings.HasPrefix(ref.GetName(), wsPrefix) {
+			names = append(names, ref.GetName())
+		}
+	}
+	return names
 }

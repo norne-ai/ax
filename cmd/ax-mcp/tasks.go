@@ -72,6 +72,7 @@ type taskClient interface {
 	UpdateWorkspace(ctx context.Context, in *v1alpha1.UpdateWorkspaceRequest, opts ...grpc.CallOption) (*v1alpha1.Workspace, error)
 	UpdateTask(ctx context.Context, in *v1alpha1.UpdateTaskRequest, opts ...grpc.CallOption) (*v1alpha1.Task, error)
 	DeleteTask(ctx context.Context, in *v1alpha1.DeleteTaskRequest, opts ...grpc.CallOption) (*v1alpha1.DeleteTaskResponse, error)
+	DeleteWorkspace(ctx context.Context, in *v1alpha1.DeleteWorkspaceRequest, opts ...grpc.CallOption) (*v1alpha1.DeleteWorkspaceResponse, error)
 }
 
 // taskSource caches the AX task list. The AX server has no list-watch RPC and

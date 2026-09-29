@@ -70,7 +70,7 @@ func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig
 
 	instructions := "Read-only queries against the AX orchestrator on this cluster: ax_list_tasks, ax_get_task and ax_cluster_summary."
 	if writes.enabled {
-		instructions += " It can also launch a confined coding task (ax_launch_task) and delete an assistant-launched task (ax_delete_task); both are guarded and require an explicit confirm."
+		instructions += " It can also launch a repository coding task (ax_launch_task) and delete an assistant-launched task (ax_delete_task); both are guarded and require an explicit confirm."
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "ax-mcp", Version: "0.1.0"}, &mcp.ServerOptions{
 		Instructions: instructions,
@@ -97,7 +97,7 @@ func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig
 	if writes.enabled {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "ax_launch_task",
-			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, secrets, gateway and resource limits are fixed by the operator; you supply the experiment name, the prompt, and optionally the model (only these: " + writes.modelList() + ") and reasoning effort. Preview is enabled by default: web apps must serve on port 3000 and get a hot-reloading panel beside the Qwen chat. Set preview=false only for non-web tasks. There is a cap on concurrent assistant tasks.",
+			Description: "Launch a Qwen coding task against a repository in the norne-ai GitHub organisation, defaulting to norne-ai/experiments when you omit it. The agent works across the selected repository, then commits and pushes an isolated branch. Arbitrary organisations and Git URLs are rejected so credentials cannot be redirected. The runner image, secrets, gateway and resource limits are fixed by the operator; you supply the task key and prompt, and optionally the repository, a base branch (main unless the repository's own default differs - norne-ai/experiments has no main), the model (only these: " + writes.modelList() + ") and reasoning effort. Preview is enabled by default: web apps must serve on port 3000 and get a hot-reloading panel beside the Qwen chat. Set preview=false only for non-web tasks. There is a cap on concurrent assistant tasks.",
 			Annotations: &mcp.ToolAnnotations{
 				ReadOnlyHint:    false,
 				DestructiveHint: ptrFalse(),
@@ -108,7 +108,7 @@ func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig
 
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "ax_delete_task",
-			Description: "Delete an assistant-launched task whose name starts with wa-. Destructive and final: the sandbox and any unpushed work are lost. The first call only reports the task and refuses; call again with confirmName equal to the name to actually delete. Tasks not launched through this server cannot be deleted here.",
+			Description: "Delete an assistant-launched task whose name starts with wa-, and with it the per-task workspace the launcher created for it. Destructive and final: the sandbox and any unpushed work are lost. The first call only reports the task and refuses; call again with confirmName equal to the name to actually delete. Tasks not launched through this server cannot be deleted here.",
 			Annotations: &mcp.ToolAnnotations{
 				ReadOnlyHint:    false,
 				DestructiveHint: ptrTrue(),

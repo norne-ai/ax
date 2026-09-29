@@ -34,11 +34,13 @@ type fakeClient struct {
 	getErr    error
 
 	// Write-path records and injected failures.
-	wsCalls     []*v1alpha1.UpdateWorkspaceRequest
-	taskCalls   []*v1alpha1.UpdateTaskRequest
-	deleteCalls []*v1alpha1.DeleteTaskRequest
-	writeErr    error
-	deleteErr   error
+	wsCalls       []*v1alpha1.UpdateWorkspaceRequest
+	taskCalls     []*v1alpha1.UpdateTaskRequest
+	deleteCalls   []*v1alpha1.DeleteTaskRequest
+	deleteWsCalls []*v1alpha1.DeleteWorkspaceRequest
+	writeErr      error
+	deleteErr     error
+	deleteWsErr   error
 
 	listCalls int
 	getCalls  int
@@ -82,6 +84,14 @@ func (f *fakeClient) DeleteTask(_ context.Context, in *v1alpha1.DeleteTaskReques
 		return nil, f.deleteErr
 	}
 	return &v1alpha1.DeleteTaskResponse{}, nil
+}
+
+func (f *fakeClient) DeleteWorkspace(_ context.Context, in *v1alpha1.DeleteWorkspaceRequest, _ ...grpc.CallOption) (*v1alpha1.DeleteWorkspaceResponse, error) {
+	f.deleteWsCalls = append(f.deleteWsCalls, in)
+	if f.deleteWsErr != nil {
+		return nil, f.deleteWsErr
+	}
+	return &v1alpha1.DeleteWorkspaceResponse{}, nil
 }
 
 func pbTask(name, ateespace, phase string, created time.Time) *v1alpha1.Task {
