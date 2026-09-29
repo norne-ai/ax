@@ -808,3 +808,164 @@ func TestWebSocketUpgradeIsProxied(t *testing.T) {
 		t.Fatal("the upgrade never reached the router")
 	}
 }
+
+// A preview hostname has to reach the same actor as the task's own hostname, with
+// the browser-visible Host preserved on the way in: that Host is what the preview
+// mux inside the task routes the app on, and it is the only thing giving the app
+// an origin distinct from the Web Shell's.
+func TestPreviewHostnameSelectsSameActor(t *testing.T) {
+	type seen struct {
+		host  string
+		actor string
+		path  string
+	}
+	got := make(chan seen, 1)
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- seen{host: r.Host, actor: r.Header.Get(targetActorHeader), path: r.URL.RequestURI()}
+		_, _ = w.Write([]byte("app"))
+	}))
+	defer router.Close()
+
+	lister := listerWith(newTask("my-task", "default", "Running", "my-task"))
+	d := newDashboard(mustConfig(t, router.URL), newTaskSource(lister, 500, 3*time.Second))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, requestFor(t, "GET", "preview-my-task.norne", "/blog/hello?x=1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case s := <-got:
+		if s.actor != "default/my-task" {
+			t.Errorf("%s = %q, want the previewed task's actor", targetActorHeader, s.actor)
+		}
+		if s.host != "preview-my-task.norne" {
+			t.Errorf("upstream Host = %q, want the preview hostname preserved", s.host)
+		}
+		if s.path != "/blog/hello?x=1" {
+			t.Errorf("upstream path = %q, want the original path and query", s.path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request never reached the router")
+	}
+}
+
+func TestResolveTaskPreviewAlias(t *testing.T) {
+	lister := listerWith(
+		newTask("my-task", "default", "Running", "my-task"),
+		newTask("preview-named", "default", "Running", "preview-named"),
+	)
+	d := newDashboard(mustConfig(t, "http://127.0.0.1:1"), newTaskSource(lister, 500, time.Hour))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	cases := []struct {
+		label    string
+		wantName string
+		wantOK   bool
+		comment  string
+	}{
+		{label: "my-task", wantName: "my-task", wantOK: true, comment: "plain hostname"},
+		{label: "preview-my-task", wantName: "my-task", wantOK: true, comment: "preview alias"},
+		// A task really named preview-named keeps its own hostname: the alias only
+		// applies once the direct lookup fails.
+		{label: "preview-named", wantName: "preview-named", wantOK: true, comment: "real task wins"},
+		{label: "preview-nothing", wantName: "", wantOK: false, comment: "alias of a missing task"},
+		{label: "preview-", wantName: "", wantOK: false, comment: "prefix alone is not a task name"},
+		{label: "preview-a.b", wantName: "", wantOK: false, comment: "not one DNS label"},
+	}
+	for _, tc := range cases {
+		task, ok := d.resolveTask(context.Background(), tc.label)
+		if ok != tc.wantOK || task.Name != tc.wantName {
+			t.Errorf("resolveTask(%q) = (%q, %v), want (%q, %v) [%s]",
+				tc.label, task.Name, ok, tc.wantName, tc.wantOK, tc.comment)
+		}
+	}
+}
+
+func TestPreviewURLStaysOneDNSLabel(t *testing.T) {
+	d := newDashboard(mustConfig(t, "http://127.0.0.1:1"), newTaskSource(listerWith(), 500, time.Second))
+	req := requestFor(t, "GET", "ax.norne", "/api/tasks")
+
+	cases := []struct {
+		name string
+		want string
+	}{
+		{name: "my-task", want: "http://preview-my-task.norne/"},
+		// The prefix must fit inside the same 63-character label the router and the
+		// ingress wildcard already demand, so a long name gets no preview link
+		// rather than a hostname that can never resolve.
+		{name: strings.Repeat("t", 58), want: ""},
+	}
+	for _, tc := range cases {
+		if got := d.previewURL(req, taskInfo{Name: tc.name}); got != tc.want {
+			t.Errorf("previewURL(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPreviewHostnameRejectsNonRunningTask(t *testing.T) {
+	lister := listerWith(newTask("my-task", "default", "Suspended", "my-task"))
+	d := newDashboard(mustConfig(t, "http://127.0.0.1:1"), newTaskSource(lister, 500, 3*time.Second))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, requestFor(t, "GET", "preview-my-task.norne", "/"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: a suspended actor must not be resumed by a preview (body: %s)",
+			rec.Code, rec.Body.String())
+	}
+}
+
+func TestUnknownPreviewHostnameExplainsItself(t *testing.T) {
+	d := newDashboard(mustConfig(t, "http://127.0.0.1:1"), newTaskSource(listerWith(), 500, 3*time.Second))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, requestFor(t, "GET", "preview-gone.norne", "/"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "No task to preview") {
+		t.Errorf("body does not explain the preview hostname convention: %s", body)
+	}
+}
+
+func TestTasksAPIReportsPreviewURL(t *testing.T) {
+	lister := listerWith(
+		newTask("my-task", "default", "Running", "my-task"),
+		newTask("finished", "default", "Succeeded", "finished"),
+	)
+	d := newDashboard(mustConfig(t, "http://127.0.0.1:1"), newTaskSource(lister, 500, time.Hour))
+	if err := d.tasks.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, requestFor(t, "GET", "ax.norne", "/api/tasks"))
+
+	var resp tasksResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding /api/tasks: %v", err)
+	}
+	byName := make(map[string]taskView, len(resp.Tasks))
+	for _, view := range resp.Tasks {
+		byName[view.Name] = view
+	}
+	if got := byName["my-task"].PreviewURL; got != "http://preview-my-task.norne/" {
+		t.Errorf("running task previewURL = %q, want the preview hostname", got)
+	}
+	if got := byName["finished"].PreviewURL; got != "" {
+		t.Errorf("finished task previewURL = %q, want empty: nothing routes to it", got)
+	}
+}

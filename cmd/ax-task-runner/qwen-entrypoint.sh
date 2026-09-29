@@ -112,6 +112,25 @@ if [ -n "$settings_path" ] && [ "$settings_path" != "$QWEN_CODE_SYSTEM_SETTINGS_
   export QWEN_CODE_SYSTEM_SETTINGS_PATH
 fi
 
+# A dev server running beside the daemon cannot get its own URL: the atenet
+# router only ever reaches this container on port 80, and the runner forwards
+# that one port to exactly one target. So the target becomes a path mux that
+# keeps the Web Shell on / and gives the app AX_PREVIEW_BASE.
+if [ -n "${AX_PREVIEW_TARGET:-}" ]; then
+  : "${AX_PREVIEW_DAEMON_TARGET:=$AX_HTTP_PROXY_TARGET}"
+  : "${AX_PREVIEW_PORT:=8099}"
+  if [ -n "${AX_PREVIEW_BASE:-}" ]; then
+    export AX_PREVIEW_BASE
+  fi
+  if [ -n "${AX_PREVIEW_HOST_PREFIX:-}" ]; then
+    export AX_PREVIEW_HOST_PREFIX
+  fi
+  AX_HTTP_PROXY_TARGET="http://127.0.0.1:$AX_PREVIEW_PORT"
+  export AX_PREVIEW_TARGET AX_PREVIEW_DAEMON_TARGET AX_PREVIEW_PORT
+  export AX_HTTP_PROXY_TARGET
+  node /usr/local/libexec/qwen-preview-mux.mjs >>/workspace/.ax/qwen-preview-mux.log 2>&1 &
+fi
+
 # Keep the Go runner as PID 1 so its process-group supervision and signal
 # forwarding behavior is unchanged.
 exec /usr/local/libexec/ax-task-runner "$@"

@@ -31,6 +31,16 @@ RUN npm install --global "@qwen-code/qwen-code@${QWEN_CODE_VERSION}" \
     && chmod 0755 /usr/local/lib/node_modules/@qwen-code/qwen-code/vendor/ripgrep/x64-linux/rg \
     && npm cache clean --force
 
+# The forked Web Shell, staged by scripts/build-qwen-web-shell.sh (the build
+# stops here until that has run). The daemon serves this directory off disk and
+# takes everything else from the npm install above, so swapping it in adds the
+# preview panel that opens itself while the daemon, its tools, and the wire
+# protocol stay the pinned release. The whole tree is replaced because the asset
+# names are content hashes, and mixing two builds would serve stale chunks.
+COPY .build/qwen-web-shell/ /tmp/qwen-web-shell/
+RUN rm -rf /usr/local/lib/node_modules/@qwen-code/qwen-code/web-shell \
+    && mv /tmp/qwen-web-shell /usr/local/lib/node_modules/@qwen-code/qwen-code/web-shell
+
 # Qwen Code loads this system profile for every container user.
 # Endpoint, model, and the non-secret local placeholder key are supplied by the
 # entrypoint so a Task can override any of them with spec.env. A Task can also
@@ -44,6 +54,7 @@ COPY bin/linux_amd64/ax-task-runner /usr/local/libexec/ax-task-runner
 COPY --chmod=0755 cmd/ax-task-runner/git-askpass.sh /usr/local/bin/ax-git-askpass
 COPY --chmod=0755 cmd/ax-task-runner/qwen-serve.sh /usr/local/bin/ax-qwen-serve
 COPY cmd/ax-task-runner/qwen-serve-bootstrap.mjs /usr/local/libexec/qwen-serve-bootstrap.mjs
+COPY cmd/ax-task-runner/qwen-preview-mux.mjs /usr/local/libexec/qwen-preview-mux.mjs
 COPY --chmod=0755 cmd/ax-task-runner/qwen-entrypoint.sh /usr/local/bin/ax-task-runner
 
 ENTRYPOINT ["/usr/local/bin/ax-task-runner"]

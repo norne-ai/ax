@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/.." && pwd)"
 
-default_image="localhost:5001/ax-qwen-task-runner@sha256:aa6d91f1f02c86e6e0437c8c9dd8f6cbb1132eb2b13610a826a7c1977427bdfa"
+default_image="localhost:5001/ax-qwen-task-runner@sha256:2f6a95d84435706a174e5e097443d8394d2e1898c4b2c03faacf75af6329bfb5"
 image="${AX_QWEN_IMAGE:-$default_image}"
 
 # Provider profiles baked into the runner image. Model Studio models are declared
@@ -34,6 +34,11 @@ prompt_file=""
 watch=false
 dry_run=false
 serve=true
+preview_port=""
+preview_domain="${AX_PREVIEW_DOMAIN:-norne}"
+# Must match AX_PREVIEW_HOST_PREFIX's default in the task's preview mux, or the
+# hostname this script advertises is not the one the mux routes.
+preview_host_prefix="preview-"
 
 usage() {
   cat <<'EOF'
@@ -66,6 +71,20 @@ Options:
       --reasoning-effort EFFORT
                         Model reasoning effort: none, low, medium, or xhigh
                         (default: the model's own default)
+      --preview [PORT]  Give the app the agent runs a hostname of its own:
+                        http://preview-<task>.<preview-domain>. Sets
+                        AX_PREVIEW_TARGET for the runner's preview mux, and PORT
+                        is the port the app listens on inside the task (default
+                        3000). The Web Shell derives the preview hostname from
+                        its own origin, then opens the panel beside the chat on
+                        load, hot reload included. Needs a runner image carrying
+                        qwen-preview-mux.mjs and the forked shell; an older
+                        --image digest silently serves the Web Shell instead of
+                        the app.
+      --preview-domain NAME
+                        Base domain the preview hostname is reported under
+                        (default $AX_PREVIEW_DOMAIN or norne, the LAN zone; use
+                        norne.app for the tunnel, where the scheme is https).
   -a, --atespace NAME  AX atespace (default: $AX_ATESPACE or default)
       --watch          Watch task status after applying it
       --serve          Run Qwen Serve (default; retained for explicit scripts)
@@ -75,7 +94,7 @@ Options:
 
 Environment overrides:
   AX_BIN, AX_QWEN_IMAGE, AX_QWEN_ENDPOINT, AX_QWEN_MODEL, AX_QWEN_PROVIDER,
-  AX_QWEN_API_KEY, AX_QWEN_REASONING_EFFORT, AX_ATESPACE,
+  AX_QWEN_API_KEY, AX_QWEN_REASONING_EFFORT, AX_ATESPACE, AX_PREVIEW_DOMAIN,
   AX_MODELSTUDIO_SECRET, AX_MODELSTUDIO_SECRET_KEY,
   AX_EXPERIMENTS_GIT_SECRET, AX_EXPERIMENTS_GIT_SECRET_KEY
 
@@ -176,6 +195,30 @@ while (($#)); do
       ;;
     --api-key-secret-key=*)
       model_secret_key="${1#*=}"
+      shift
+      ;;
+    --preview)
+      # The port is optional, so only consume the next word when it is a number;
+      # otherwise a following flag like --dry-run would be swallowed as a port.
+      if [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]]; then
+        preview_port="$2"
+        shift 2
+      else
+        preview_port="3000"
+        shift
+      fi
+      ;;
+    --preview=*)
+      preview_port="${1#*=}"
+      shift
+      ;;
+    --preview-domain)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      preview_domain="$2"
+      shift 2
+      ;;
+    --preview-domain=*)
+      preview_domain="${1#*=}"
       shift
       ;;
     --list-models)
@@ -366,6 +409,35 @@ if [[ ${#task_name} -gt 63 || ! "$task_name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ 
   exit 2
 fi
 
+preview_target=""
+preview_url=""
+preview_note=""
+if [[ -n "$preview_port" ]]; then
+  if [[ ! "$preview_port" =~ ^[0-9]+$ ]] || ((preview_port < 1 || preview_port > 65535)); then
+    echo "Invalid --preview port '$preview_port': expected 1-65535." >&2
+    exit 2
+  fi
+  if [[ ! "$preview_domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+    echo "Invalid --preview-domain '$preview_domain': use a lowercase DNS name." >&2
+    exit 2
+  fi
+  if (( ${#task_name} + ${#preview_host_prefix} > 63 )); then
+    echo "Task name '$task_name' leaves no room for the ${preview_host_prefix} hostname prefix (max $((63 - ${#preview_host_prefix})) characters)." >&2
+    exit 2
+  fi
+  # The LAN zone is served over plain HTTP by ingress-nginx; every other base
+  # domain reaches the cluster through the Cloudflare tunnel, which is HTTPS and
+  # behind Access. Reporting the wrong scheme would hand out a dead link.
+  if [[ "$preview_domain" == norne ]]; then
+    preview_scheme="http"
+  else
+    preview_scheme="https"
+  fi
+  preview_target="http://127.0.0.1:$preview_port"
+  preview_url="$preview_scheme://$preview_host_prefix$task_name.$preview_domain/"
+  preview_note="- The app must listen on 0.0.0.0:$preview_port inside the task and keep running after you finish (for a Next.js dev server: NEXT_TELEMETRY_DISABLED=1 npx next dev -H 0.0.0.0 -p $preview_port, started in the background, with no basePath). The preview panel at $preview_url opens itself beside the chat, so confirm the app answers there before calling the work done."
+fi
+
 git_branch="qwen/$experiment-$started_at"
 prompt="$(cat <<EOF
 You are working in the norne-ai/experiments Git repository on branch $git_branch.
@@ -376,6 +448,7 @@ Mandatory delivery rules:
 - Complete and verify the requested work.
 - Before declaring the task complete, commit all changes on $git_branch with a meaningful commit message and push that branch to origin.
 - In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.
+$preview_note
 
 User task:
 $prompt
@@ -401,6 +474,7 @@ manifest="$(
   AX_TASK_MODEL_SECRET_KEY="$model_secret_key" \
   AX_TASK_REASONING_EFFORT="$reasoning_effort" \
   AX_TASK_SERVE="$serve" \
+  AX_TASK_PREVIEW_TARGET="$preview_target" \
   AX_EXPERIMENT_NAME="$experiment" \
   AX_GIT_BRANCH="$git_branch" \
   AX_GIT_SECRET="$git_secret" \
@@ -457,6 +531,18 @@ env = [
     {"name": "AX_EXPERIMENT_NAME", "value": os.environ["AX_EXPERIMENT_NAME"]},
     {"name": "AX_GIT_BRANCH", "value": os.environ["AX_GIT_BRANCH"]},
 ]
+
+# The task's preview mux only fronts the daemon when AX_PREVIEW_TARGET is set, so
+# an unset port here means the hostname routes to the Web Shell instead.
+# Do not pin AX_PREVIEW_URL here. The same task can be opened through the plain
+# HTTP LAN zone or the HTTPS tunnel, and an absolute URL for either one becomes
+# mixed content or an invalid TLS navigation in the other. The mux publishes a
+# bare preview hostname derived from the incoming Host so the Web Shell can keep
+# the page's scheme and port. preview_url remains only in the prompt and launch
+# summary as a convenient link for the zone selected with --preview-domain.
+preview_target = os.environ.get("AX_TASK_PREVIEW_TARGET", "")
+if preview_target:
+    env.append({"name": "AX_PREVIEW_TARGET", "value": preview_target})
 secret_env = [{
     "name": "GITHUB_TOKEN",
     "secretKeyRef": {
@@ -547,6 +633,7 @@ Model API key: $key_source
 Reasoning effort: ${reasoning_effort:-default}
 Experiment path: runs/$experiment
 Git branch: $git_branch
+Preview app: ${preview_url:-not requested (pass --preview)}
 
 Watch status:
   $ax_bin -a $atespace watch task $task_name

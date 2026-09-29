@@ -49,6 +49,11 @@ type taskView struct {
 	PendingAction    string          `json:"pendingAction,omitempty"`
 	Conditions       []conditionInfo `json:"conditions,omitempty"`
 	URL              string          `json:"url"`
+	// PreviewURL is the task's preview hostname, empty when the task is not
+	// running or its name leaves no room for the prefix in one DNS label. The
+	// page does not link to it (a card is already an anchor, and nesting links
+	// is not legal HTML), but /api/tasks is a fine place to read the convention.
+	PreviewURL string `json:"previewURL,omitempty"`
 }
 
 // tasksResponse is the /api/tasks payload.
@@ -107,6 +112,11 @@ func (d *dashboard) serveTasksJSON(w http.ResponseWriter, r *http.Request) {
 			PendingAction:    task.PendingAction,
 			Conditions:       task.Conditions,
 			URL:              d.sessionURL(r, task),
+		}
+		// Only a Running task can be routed to at all, and the preview hostname
+		// is meaningless without the mux an app is running behind.
+		if task.running() {
+			view.PreviewURL = d.previewURL(r, task)
 		}
 		if !task.Created.IsZero() {
 			view.AgeSeconds = int64(now.Sub(task.Created).Seconds())

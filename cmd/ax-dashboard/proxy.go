@@ -35,6 +35,20 @@ const targetActorHeader = "ate-target-actor"
 // reverse proxy's Rewrite hook.
 type actorKey struct{}
 
+// previewHostPrefix turns a task's hostname into the hostname its preview app
+// is served on: preview-<task>.<base> reaches the same actor as <task>.<base>.
+//
+// The app needs a hostname of its own rather than a path under the task's. A
+// browser treats scheme+host+port as the origin, so an app mounted at
+// <task>.<base>/preview is the Web Shell's own origin, and the Web Shell's
+// preview panel refuses to embed its own origin by design. One label in front of
+// the task name buys the app a separate origin, which is also what lets the app
+// be served from / instead of a base path. Inside the task the preview mux
+// separates the two by this same Host prefix, because the atenet router only
+// ever reaches the actor's port 80 and the runner forwards that one port to one
+// target.
+const previewHostPrefix = "preview-"
+
 // dashboard routes an incoming request either to the task list or to a single
 // task's Qwen Web Shell, based purely on the Host header. Every hostname under
 // the base domain arrives at this one service, which is what lets an ingress
@@ -159,6 +173,26 @@ func (d *dashboard) sessionLabel(host string) (string, bool) {
 	return "", false
 }
 
+// resolveTask maps a session hostname label to the task that answers it. A plain
+// label is the task name. A preview- label is the preview hostname of the task
+// named by the rest of the label.
+//
+// The order is deliberate: a task whose real name starts with preview- is found
+// first, so an operator who names a task that way keeps their hostname, and the
+// alias only applies when no such task exists.
+func (d *dashboard) resolveTask(ctx context.Context, label string) (taskInfo, bool) {
+	if task, ok := d.tasks.lookup(ctx, label); ok {
+		return task, true
+	}
+	base, isPreview := strings.CutPrefix(label, previewHostPrefix)
+	if !isPreview || !isDNSLabel(base) {
+		return taskInfo{}, false
+	}
+	// A cache miss on the alias still has to force a refresh, the same way a
+	// miss on a direct task name does, or a task created moments ago previews 404.
+	return d.tasks.lookup(ctx, base)
+}
+
 // baseDomainFor returns the base domain a request arrived on, so that session
 // links stay in the same domain the browser is already using: the LAN wildcard
 // and a tunnel hostname both work, and neither leaks into the other.
@@ -175,12 +209,21 @@ func (d *dashboard) baseDomainFor(host string) string {
 // serveSession proxies every path on a task's hostname to that task's Web Shell.
 // The Web Shell serves absolute /assets URLs and has no base-path option, so it
 // must be mounted at the root of its own hostname rather than under a prefix.
-func (d *dashboard) serveSession(w http.ResponseWriter, r *http.Request, name string) {
-	task, ok := d.tasks.lookup(r.Context(), name)
+//
+// A preview hostname is routed here identically: separating the app from the
+// shell is the task's job (see previewHostPrefix), and the browser-visible Host
+// is preserved on the way in, which is what the mux inside the task routes on.
+func (d *dashboard) serveSession(w http.ResponseWriter, r *http.Request, label string) {
+	task, ok := d.resolveTask(r.Context(), label)
 	if !ok {
-		renderError(d.cfg, w, r, http.StatusNotFound, "Unknown task",
-			"There is no AX task named "+name+" in the "+d.baseDomainFor(r.Host)+" domain.",
-			"It may have been deleted, or the AX server may be unreachable.")
+		message := "There is no AX task named " + label + " in the " + d.baseDomainFor(r.Host) + " domain."
+		detail := "It may have been deleted, or the AX server may be unreachable."
+		if base, isPreview := strings.CutPrefix(label, previewHostPrefix); isPreview {
+			message = "No task to preview: there is no AX task named " + base + " in the " +
+				d.baseDomainFor(r.Host) + " domain."
+			detail = "A preview hostname is " + previewHostPrefix + "<task-name>." + d.baseDomainFor(r.Host) + "."
+		}
+		renderError(d.cfg, w, r, http.StatusNotFound, "Unknown task", message, detail)
 		return
 	}
 	if !task.running() {
@@ -268,7 +311,23 @@ func requestScheme(r *http.Request) string {
 // sessionURL builds the browser-facing URL for a task's Web Shell, in the same
 // base domain the request arrived on.
 func (d *dashboard) sessionURL(r *http.Request, task taskInfo) string {
-	host := strings.ToLower(task.Name) + "." + d.baseDomainFor(r.Host)
+	return d.urlForLabel(r, task.Name)
+}
+
+// previewURL is the task's preview hostname, or "" when the name is too long to
+// carry the prefix and still be one DNS label. Returning "" rather than a broken
+// hostname keeps the dashboard's links honest: the ingress wildcard and the
+// router both demand a single label of at most 63 characters.
+func (d *dashboard) previewURL(r *http.Request, task taskInfo) string {
+	label := previewHostPrefix + task.Name
+	if len(label) > 63 || !isDNSLabel(label) {
+		return ""
+	}
+	return d.urlForLabel(r, label)
+}
+
+func (d *dashboard) urlForLabel(r *http.Request, label string) string {
+	host := strings.ToLower(label) + "." + d.baseDomainFor(r.Host)
 	if port := portOf(r.Host); port != "" && port != "80" && port != "443" {
 		host = net.JoinHostPort(host, port)
 	}

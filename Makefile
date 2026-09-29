@@ -21,7 +21,7 @@ QWEN_TASK_RUNNER_REPO ?= localhost:5001/ax-qwen-task-runner
 QWEN_CODE_VERSION ?= 0.24.4
 CONTAINER_CLI ?= $(shell which podman 2>/dev/null || which docker 2>/dev/null)
 
-.PHONY: all build build-binaries build-task-runner build-qwen-task-runner install push push-task-runner push-qwen-task-runner deploy deploy-controller deploy-server deploy-redis apply-example apply-qwen-example test clean
+.PHONY: all build build-binaries build-task-runner build-qwen-web-shell build-qwen-task-runner install push push-task-runner push-qwen-task-runner deploy deploy-controller deploy-server deploy-redis apply-example apply-qwen-example test clean
 
 all: build
 
@@ -52,8 +52,13 @@ build-task-runner:
 	@echo "==> Building container image $(TASK_RUNNER_REPO):latest using $(CONTAINER_CLI)..."
 	$(CONTAINER_CLI) build --platform linux/amd64 -t $(TASK_RUNNER_REPO):latest -f Dockerfile.task-runner .
 
+# Stage the forked Qwen Code Web Shell the Qwen runner image swaps in.
+build-qwen-web-shell:
+	@echo "==> Building the forked Qwen Code Web Shell..."
+	./scripts/build-qwen-web-shell.sh
+
 # Build an AX task runner with Qwen Code configured for the local inference endpoint.
-build-qwen-task-runner:
+build-qwen-task-runner: build-qwen-web-shell
 	@echo "==> Cross-compiling ax-task-runner for linux/amd64..."
 	@mkdir -p bin/linux_amd64
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/linux_amd64/ax-task-runner ./cmd/ax-task-runner

@@ -1,0 +1,15 @@
+# The forked Qwen Code Web Shell that the task-runner image swaps in.
+# Build it with scripts/build-qwen-web-shell.sh, which stages the result at
+# .build/qwen-web-shell for Dockerfile.qwen-task-runner to consume (not tmp/,
+# which .dockerignore keeps out of the build context).
+#
+# The fork carries one feature: a session that is building a web app opens the
+# Web preview panel on its own, at the address the task's preview mux publishes
+# at /__qwen-preview.json. Everything else is the upstream release named below,
+# which is the same version the runner installs from npm - the shell and the
+# daemon have to agree, so this commit is rebased onto each QWEN_CODE_VERSION
+# bump in the Dockerfile rather than drifting away from it.
+repo=https://github.com/norne-ai/qwen-code.git
+branch=norne-preview-sidebar
+upstream=v0.24.4
+commit=6adb1878f7beb15a7f5851703b3a8482f172b829
