@@ -21,7 +21,7 @@ QWEN_TASK_RUNNER_REPO ?= localhost:5001/ax-qwen-task-runner
 QWEN_CODE_VERSION ?= 0.24.4
 CONTAINER_CLI ?= $(shell which podman 2>/dev/null || which docker 2>/dev/null)
 
-.PHONY: all build build-binaries build-task-runner build-qwen-web-shell build-qwen-task-runner install push push-task-runner push-qwen-task-runner deploy deploy-controller deploy-server deploy-redis apply-example apply-qwen-example test clean
+.PHONY: all build build-binaries build-task-runner build-qwen-web-shell build-qwen-task-runner verify-qwen-task-runner install push push-task-runner push-qwen-task-runner deploy deploy-controller deploy-server deploy-redis apply-example apply-qwen-example test clean
 
 all: build
 
@@ -66,6 +66,10 @@ build-qwen-task-runner: build-qwen-web-shell
 	$(CONTAINER_CLI) build --platform linux/amd64 \
 		--build-arg QWEN_CODE_VERSION=$(QWEN_CODE_VERSION) \
 		-t $(QWEN_TASK_RUNNER_REPO):latest -f Dockerfile.qwen-task-runner .
+
+verify-qwen-task-runner:
+	$(CONTAINER_CLI) run --rm --entrypoint /usr/local/bin/verify-qwen-runner-tools \
+		$(QWEN_TASK_RUNNER_REPO):latest
 
 # Push task-runner container image to registry
 push-task-runner: build-task-runner

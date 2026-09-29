@@ -26,7 +26,7 @@ metadata:
   name: qwen-local
   atespace: default
 spec:
-  image: "localhost:5001/ax-qwen-task-runner@sha256:fa7a497ac0a74489d6a76b222d7611925d3531562d3f990f0f03741433bd335b"
+  image: "localhost:5001/ax-qwen-task-runner@sha256:50d5d3ea4a3a244f02b547197fc4d0e8b1223f1f7e8cd616006eb387d5534170"
   command:
     - /usr/local/bin/ax-qwen-serve
   env:

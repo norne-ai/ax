@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/.." && pwd)"
 
-default_image="localhost:5001/ax-qwen-task-runner@sha256:2f6a95d84435706a174e5e097443d8394d2e1898c4b2c03faacf75af6329bfb5"
+default_image="localhost:5001/ax-qwen-task-runner@sha256:50d5d3ea4a3a244f02b547197fc4d0e8b1223f1f7e8cd616006eb387d5534170"
 image="${AX_QWEN_IMAGE:-$default_image}"
 
 # Provider profiles baked into the runner image. Model Studio models are declared

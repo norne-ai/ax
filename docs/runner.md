@@ -77,6 +77,22 @@ make apply-qwen-example
 ax watch task qwen-local
 ```
 
+The Qwen runner also carries the backend development and verification tools an
+autonomous task needs: Go, build-essential, GitHub CLI, kubectl, ko, buf,
+protoc, grpcurl, Dapr and NATS CLIs, PostgreSQL client tools, jq/yq, ShellCheck,
+golangci-lint, staticcheck, govulncheck, gosec, and kubeconform. Versions for
+Go-native tools are pinned in `Dockerfile.qwen-task-runner`.
+
+Verify the installed toolchain after a build:
+
+```bash
+make verify-qwen-task-runner
+```
+
+The image deliberately does not include a container daemon or a host
+`kubeconfig`. Supply scoped registry credentials and namespace-limited cluster
+credentials to individual tasks when their workflow requires them.
+
 The example runs a persistent Qwen Serve daemon without a wall-time or
 session-turn cap. It uses `approvalMode: yolo` because an AX task already runs
 inside a dedicated sandbox; use a stricter mode if the workspace or image is

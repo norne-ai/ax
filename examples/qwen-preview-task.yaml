@@ -69,7 +69,7 @@ metadata:
   name: preview-demo
   atespace: default
 spec:
-  image: "localhost:5001/ax-qwen-task-runner@sha256:2f6a95d84435706a174e5e097443d8394d2e1898c4b2c03faacf75af6329bfb5"
+  image: "localhost:5001/ax-qwen-task-runner@sha256:50d5d3ea4a3a244f02b547197fc4d0e8b1223f1f7e8cd616006eb387d5534170"
   command:
     - /usr/local/bin/ax-qwen-serve
   env:
