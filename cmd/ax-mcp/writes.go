@@ -59,6 +59,7 @@ const (
 	gitTokenEnv        = "GITHUB_TOKEN"
 	gitSecret          = "experiments-git"
 	gitSecretKey       = "token"
+	previewTarget      = "http://127.0.0.1:3000"
 
 	maxPromptChars   = 8000
 	maxExperimentLen = 80
@@ -118,6 +119,7 @@ type launchTaskInput struct {
 	Prompt          string `json:"prompt" jsonschema:"What to ask the agent to do, verbatim. The delivery rules (work under runs/<experiment>/, commit and push the branch) are appended by the server and cannot be overridden."`
 	Model           string `json:"model,omitempty" jsonschema:"Model id; must be one of the operator-allowlisted models named in the tool description. Omit to use the default."`
 	ReasoningEffort string `json:"reasoningEffort,omitempty" jsonschema:"Optional reasoning effort: none, low, medium or xhigh."`
+	Preview         *bool  `json:"preview,omitempty" jsonschema:"Preview is enabled when omitted. Set false only for a non-web task. When enabled, the app must listen on 0.0.0.0:3000 and the Web Shell opens a hot-reloading preview panel automatically."`
 }
 
 type launchTaskOutput struct {
@@ -128,6 +130,7 @@ type launchTaskOutput struct {
 	Experiment  string `json:"experiment"`
 	Model       string `json:"model"`
 	WebShell    string `json:"webShell,omitempty"`
+	PreviewURL  string `json:"previewURL,omitempty"`
 	ActiveTasks int    `json:"activeTasks"`
 	Note        string `json:"note"`
 }
@@ -186,7 +189,8 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 
 	branch := "qwen/" + name
 	ws := experimentsWorkspace(w.atespace)
-	task := waTask(w, profile, name, branch, experiment, prompt, model, effort)
+	preview := in.Preview == nil || *in.Preview
+	task := waTask(w, profile, name, branch, experiment, prompt, model, effort, preview)
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -216,8 +220,18 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 		ActiveTasks: len(active) + 1,
 		Note:        "The agent will commit its work and push branch " + branch + " to norne-ai/experiments before declaring completion.",
 	}
+	if ax.dashboardDomain != "" {
+		out.WebShell = "http://" + name + "." + ax.dashboardDomain
+	}
 	if out.Phase == "" {
 		out.Phase = "Pending"
+	}
+	if preview && ax.dashboardDomain != "" {
+		// This is an operator-facing link for the configured dashboard zone. It
+		// does not become AX_PREVIEW_URL in the Task: the in-panel URL still
+		// derives its scheme and hostname from the Shell origin.
+		out.PreviewURL = "http://preview-" + name + "." + ax.dashboardDomain
+		out.Note += " The Web Shell will open the app preview from " + out.PreviewURL + "."
 	}
 	return nil, out, nil
 }
@@ -303,7 +317,12 @@ fi
 mkdir -p "runs/$AX_EXPERIMENT_NAME"
 `
 
-func wrappedPrompt(branch, experiment, userPrompt string) string {
+func wrappedPrompt(branch, experiment, userPrompt string, preview bool) string {
+	previewNote := ""
+	if preview {
+		previewNote = `
+- The app must listen on 0.0.0.0:3000 inside the task and keep running after you finish. For Next.js, use NEXT_TELEMETRY_DISABLED=1 npx next dev -H 0.0.0.0 -p 3000 in the background, with no basePath. The preview panel opens itself beside the chat; confirm the app answers on http://127.0.0.1:3000 before calling the work done.`
+	}
 	return fmt.Sprintf(`You are working in the norne-ai/experiments Git repository on branch %s.
 
 Mandatory delivery rules:
@@ -311,10 +330,10 @@ Mandatory delivery rules:
 - Do not modify files outside runs/%s/.
 - Complete and verify the requested work.
 - Before declaring the task complete, commit all changes on %s with a meaningful commit message and push that branch to origin.
-- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.
+- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.%s
 
 User task:
-%s`, branch, experiment, experiment, branch, userPrompt)
+%s`, branch, experiment, experiment, branch, previewNote, userPrompt)
 }
 
 // waTask renders the task spec for one allowlisted model profile. The base
@@ -322,9 +341,9 @@ User task:
 // provider decides the endpoint, where the model key comes from, and whether
 // a settings profile is selected at all (the NInfer default is baked into the
 // runner image unchanged).
-func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prompt, model, effort string) *v1alpha1.Task {
+func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prompt, model, effort string, preview bool) *v1alpha1.Task {
 	env := []*v1alpha1.EnvVar{
-		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, experiment, prompt)},
+		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, experiment, prompt, preview)},
 		{Name: "OPENAI_MODEL", Value: model},
 		{Name: "AX_EXPERIMENT_NAME", Value: experiment},
 		{Name: "AX_GIT_BRANCH", Value: branch},
@@ -358,6 +377,12 @@ func waTask(w writesConfig, profile allowedModel, name, branch, experiment, prom
 	}
 	if effort != "" {
 		env = append(env, &v1alpha1.EnvVar{Name: "AX_QWEN_REASONING_EFFORT", Value: effort})
+	}
+	if preview {
+		// The mux answers /__qwen-preview.json with a hostname derived from the
+		// incoming Shell Host. Do not set AX_PREVIEW_URL: an absolute LAN URL is
+		// mixed content through the HTTPS tunnel, and the reverse is invalid TLS.
+		env = append(env, &v1alpha1.EnvVar{Name: "AX_PREVIEW_TARGET", Value: previewTarget})
 	}
 
 	return &v1alpha1.Task{

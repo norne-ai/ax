@@ -61,7 +61,7 @@ type config struct {
 // caller cannot.
 const defaultWaModels = "modelstudio=qwen3.8-flash:medium,ninfer=qwen3.8-27b"
 
-const defaultRunnerImage = "localhost:5001/ax-qwen-task-runner@sha256:aa6d91f1f02c86e6e0437c8c9dd8f6cbb1132eb2b13610a826a7c1977427bdfa"
+const defaultRunnerImage = "localhost:5001/ax-qwen-task-runner@sha256:2f6a95d84435706a174e5e097443d8394d2e1898c4b2c03faacf75af6329bfb5"
 
 func main() {
 	var (

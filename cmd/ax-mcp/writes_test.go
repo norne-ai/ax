@@ -83,6 +83,7 @@ func TestLaunchTaskBuildsConfinedSpec(t *testing.T) {
 		Arguments: map[string]any{
 			"experiment": "fix.parse_bug-2",
 			"prompt":     "Write a parser regression test and make it pass.",
+			"preview":    true,
 		},
 	})
 	if err != nil || res.IsError {
@@ -128,6 +129,25 @@ func TestLaunchTaskBuildsConfinedSpec(t *testing.T) {
 	if !strings.Contains(prompt, "Write a parser regression test") {
 		t.Error("wrapped prompt lost the user task")
 	}
+	if !strings.Contains(prompt, "0.0.0.0:3000") || !strings.Contains(prompt, "preview panel opens itself") {
+		t.Error("preview task prompt does not tell the agent how to serve the app")
+	}
+	if target, ok := envValue(task, "AX_PREVIEW_TARGET"); !ok || target != previewTarget {
+		t.Errorf("AX_PREVIEW_TARGET = %q/%v, want %q", target, ok, previewTarget)
+	}
+	if _, set := envValue(task, "AX_PREVIEW_URL"); set {
+		t.Error("preview task must derive its hostname from the Shell origin, not pin AX_PREVIEW_URL")
+	}
+	wantPreviewURL := "http://preview-" + out.Name + ".norne"
+	if out.PreviewURL != wantPreviewURL {
+		t.Errorf("previewURL = %q, want %q", out.PreviewURL, wantPreviewURL)
+	}
+	if !strings.Contains(out.Note, wantPreviewURL) {
+		t.Errorf("note = %q, want preview URL %q", out.Note, wantPreviewURL)
+	}
+	if wantWebShell := "http://" + out.Name + ".norne"; out.WebShell != wantWebShell {
+		t.Errorf("webShell = %q, want %q", out.WebShell, wantWebShell)
+	}
 
 	// Credentials must be Secret references, never plaintext values, and the
 	// Model Studio key env must not also appear as a plaintext env var.
@@ -149,6 +169,62 @@ func TestLaunchTaskBuildsConfinedSpec(t *testing.T) {
 	// Resource limits are the operator's, not the caller's.
 	if spec.GetResources().GetLimits().GetMemory() != "8Gi" {
 		t.Errorf("memory limit = %q", spec.GetResources().GetLimits().GetMemory())
+	}
+}
+
+func TestLaunchExplicitlyWithoutPreviewDoesNotOpenPanel(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ax_launch_task",
+		Arguments: map[string]any{
+			"experiment": "docs-only",
+			"prompt":     "Improve the documentation.",
+			"preview":    false,
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	var out launchTaskOutput
+	decodeStructured(t, res.StructuredContent, &out)
+	task := fake.taskCalls[0].GetTask()
+	if _, set := envValue(task, "AX_PREVIEW_TARGET"); set {
+		t.Error("non-preview task unexpectedly enables the preview mux")
+	}
+	if out.PreviewURL != "" || strings.Contains(out.Note, "app preview") {
+		t.Errorf("non-preview task note unexpectedly advertises a preview: %q", out.Note)
+	}
+	prompt, _ := envValue(task, "AX_QWEN_PROMPT")
+	if strings.Contains(prompt, "0.0.0.0:3000") {
+		t.Error("non-preview task prompt contains web-server instructions")
+	}
+}
+
+func TestLaunchDefaultsToPreview(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ax_launch_task",
+		Arguments: map[string]any{
+			"experiment": "web-by-default",
+			"prompt":     "Build a web app.",
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	var out launchTaskOutput
+	decodeStructured(t, res.StructuredContent, &out)
+	task := fake.taskCalls[0].GetTask()
+	if target, ok := envValue(task, "AX_PREVIEW_TARGET"); !ok || target != previewTarget {
+		t.Errorf("default AX_PREVIEW_TARGET = %q/%v, want %q", target, ok, previewTarget)
+	}
+	wantPreviewURL := "http://preview-" + out.Name + ".norne"
+	if out.PreviewURL != wantPreviewURL || !strings.Contains(out.Note, wantPreviewURL) {
+		t.Errorf("default preview output = URL %q note %q, want %q", out.PreviewURL, out.Note, wantPreviewURL)
 	}
 }
 

@@ -97,7 +97,7 @@ func newMCPServer(tasks *taskSource, dashboardDomain string, writes writesConfig
 	if writes.enabled {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "ax_launch_task",
-			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, secrets, gateway and resource limits are fixed by the operator; you supply the experiment name, the prompt, and optionally the model (only these: " + writes.modelList() + ") and reasoning effort. There is a cap on concurrent assistant tasks.",
+			Description: "Launch a confined Qwen coding task in the norne-ai/experiments repository. The agent works only under runs/<experiment>/, then commits and pushes a branch. The runner image, secrets, gateway and resource limits are fixed by the operator; you supply the experiment name, the prompt, and optionally the model (only these: " + writes.modelList() + ") and reasoning effort. Preview is enabled by default: web apps must serve on port 3000 and get a hot-reloading panel beside the Qwen chat. Set preview=false only for non-web tasks. There is a cap on concurrent assistant tasks.",
 			Annotations: &mcp.ToolAnnotations{
 				ReadOnlyHint:    false,
 				DestructiveHint: ptrFalse(),
