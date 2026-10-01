@@ -136,6 +136,28 @@ type launchTaskInput struct {
 	Model           string `json:"model,omitempty" jsonschema:"Model id; must be one of the operator-allowlisted models named in the tool description. Omit to use the default."`
 	ReasoningEffort string `json:"reasoningEffort,omitempty" jsonschema:"Optional reasoning effort: none, low, medium or xhigh."`
 	Preview         *bool  `json:"preview,omitempty" jsonschema:"Preview is enabled when omitted. Set false only for a non-web task. When enabled, the app must listen on 0.0.0.0:3000 and the Web Shell opens a hot-reloading preview panel automatically."`
+	Review          *bool  `json:"review,omitempty" jsonschema:"The automated review phase is enabled when omitted: after the agent finishes, a fresh Qwen session reviews its uncommitted work and the agent applies the findings before committing and pushing. Set false to deliver in one pass, committing and pushing as the agent's last step."`
+}
+
+// boolEnv renders a flag the runner reads as text, since Task env values are strings.
+func boolEnv(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+// launchNote tells the caller when the branch becomes visible on the remote, which
+// differs by phase: with the review on, nothing is pushed until it has run.
+func launchNote(review bool, branch, repo string) string {
+	if review {
+		return "The agent stages its work and stops. A fresh Qwen session then reviews the " +
+			"uncommitted change and the agent applies those findings before committing and " +
+			"pushing " + branch + " to " + repo + ", so the branch only appears after the " +
+			"review cycle completes. Watch the Web Shell to see all three phases."
+	}
+	return "The agent will commit its work and push branch " + branch + " to " + repo +
+		" before declaring completion."
 }
 
 type launchTaskOutput struct {
@@ -147,6 +169,7 @@ type launchTaskOutput struct {
 	BaseBranch  string `json:"baseBranch"`
 	Experiment  string `json:"experiment"`
 	Model       string `json:"model"`
+	Review      bool   `json:"review"`
 	WebShell    string `json:"webShell,omitempty"`
 	PreviewURL  string `json:"previewURL,omitempty"`
 	ActiveTasks int    `json:"activeTasks"`
@@ -217,7 +240,8 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 	workspaceName := wsPrefix + name
 	ws := repositoryWorkspace(w.atespace, workspaceName, repository, baseBranch)
 	preview := in.Preview == nil || *in.Preview
-	task := waTask(w, profile, name, workspaceName, branch, repository, baseBranch, prompt, model, effort, preview)
+	review := in.Review == nil || *in.Review
+	task := waTask(w, profile, name, workspaceName, branch, repository, baseBranch, prompt, model, effort, preview, review)
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -246,8 +270,9 @@ func (ax *axTools) launchTask(ctx context.Context, _ *mcp.CallToolRequest, in la
 		BaseBranch:  baseBranch,
 		Experiment:  experiment,
 		Model:       model,
+		Review:      review,
 		ActiveTasks: len(active) + 1,
-		Note:        "The agent will commit its work and push branch " + branch + " to " + gitHubOrg + "/" + repository + " before declaring completion.",
+		Note:        launchNote(review, branch, gitHubOrg+"/"+repository),
 	}
 	if ax.dashboardDomain != "" {
 		out.WebShell = "http://" + name + "." + ax.dashboardDomain
@@ -363,29 +388,61 @@ const waPrepareScript = `set -euo pipefail
 git config --global user.name "${AX_GIT_AUTHOR_NAME:-Norne Qwen}"
 git config --global user.email "${AX_GIT_AUTHOR_EMAIL:-qwen@norne.local}"
 cd /workspace
-if git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
+# Runner state and review scratch space belong to neither the commit nor the review.
+if [ -f .git/info/exclude ]; then
+  grep -qxF '.ax/' .git/info/exclude || printf '.ax/\n.qwen/\n' >>.git/info/exclude
+fi
+sync_ref=""
+if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  # Nothing was materialised. Ask the remote for its real default branch instead of
+  # trusting the requested one: norne-ai/experiments has no main at all.
+  for ref in "${AX_GIT_BASE_BRANCH:-}" "$(git -c core.askPass=/usr/local/bin/ax-git-askpass ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/{sub("refs/heads/","",$2); print $2; exit}')"; do
+    [ -n "$ref" ] || continue
+    if git -c core.askPass=/usr/local/bin/ax-git-askpass fetch -q origin "$ref" 2>/dev/null; then
+      sync_ref="$ref"
+      break
+    fi
+  done
+fi
+if [ -n "$sync_ref" ]; then
+  git checkout -q -B "$AX_GIT_BRANCH" FETCH_HEAD
+elif git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
   git switch "$AX_GIT_BRANCH"
 else
+  # An unreachable base branch is a legitimate start state, not a failure: the task
+  # creates the history. Aborting here would also take the Web Shell down, because
+  # qwen serve is exec'd after this script.
+  if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    echo "ax: /workspace has no commits and no base branch was reachable; starting from an empty tree" >&2
+  fi
   git switch -c "$AX_GIT_BRANCH"
 fi
 `
 
-func wrappedPrompt(branch, repository, baseBranch, userPrompt string, preview bool) string {
+func wrappedPrompt(branch, repository, baseBranch, userPrompt string, preview, review bool) string {
 	previewNote := ""
 	if preview {
 		previewNote = `
 - The app must listen on 0.0.0.0:3000 inside the task and keep running after you finish. For Next.js, use NEXT_TELEMETRY_DISABLED=1 npx next dev -H 0.0.0.0 -p 3000 in the background, with no basePath. The preview panel opens itself beside the chat; confirm the app answers on http://127.0.0.1:3000 before calling the work done.`
 	}
+	// With the review phase on, the work has to stay uncommitted for the review to have
+	// anything to read, so committing and pushing moves to the phase after the review.
+	deliveryNote := `
+- Do not commit or push yet. A code review of your uncommitted work runs automatically as soon as you finish, so stage everything with git add -A (new files included) and stop there.
+- In your final response, report the verification you performed and any remaining issues.`
+	if !review {
+		deliveryNote = `
+- Before declaring the task complete, commit all changes on ` + branch + ` with a meaningful commit message and push that branch to origin.
+- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.`
+	}
 	return fmt.Sprintf(`You are working in the %s/%s Git repository on branch %s, created from %s.
 
 Mandatory delivery rules:
 - Work in the checked-out repository at /workspace.
-- Complete and verify the requested work.
-- Before declaring the task complete, commit all changes on %s with a meaningful commit message and push that branch to origin.
-- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.%s
+- Complete and verify the requested work.%s%s
 
 User task:
-%s`, gitHubOrg, repository, branch, baseBranch, branch, previewNote, userPrompt)
+%s`, gitHubOrg, repository, branch, baseBranch, deliveryNote, previewNote, userPrompt)
 }
 
 // waTask renders the task spec for one allowlisted model profile. The base
@@ -393,11 +450,13 @@ User task:
 // provider decides the endpoint, where the model key comes from, and whether
 // a settings profile is selected at all (the NInfer default is baked into the
 // runner image unchanged).
-func waTask(w writesConfig, profile allowedModel, name, workspaceName, branch, repository, baseBranch, prompt, model, effort string, preview bool) *v1alpha1.Task {
+func waTask(w writesConfig, profile allowedModel, name, workspaceName, branch, repository, baseBranch, prompt, model, effort string, preview, review bool) *v1alpha1.Task {
 	env := []*v1alpha1.EnvVar{
-		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, repository, baseBranch, prompt, preview)},
+		{Name: "AX_QWEN_PROMPT", Value: wrappedPrompt(branch, repository, baseBranch, prompt, preview, review)},
 		{Name: "OPENAI_MODEL", Value: model},
 		{Name: "AX_GIT_BRANCH", Value: branch},
+		{Name: "AX_GIT_BASE_BRANCH", Value: baseBranch},
+		{Name: "AX_QWEN_REVIEW", Value: boolEnv(review)},
 	}
 	secrets := []*v1alpha1.SecretEnvVar{
 		{Name: gitTokenEnv, SecretKeyRef: &v1alpha1.SecretKeyRef{Name: gitSecret, Key: gitSecretKey}},

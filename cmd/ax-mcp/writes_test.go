@@ -723,3 +723,71 @@ func TestDeleteReportsRPCFailure(t *testing.T) {
 		t.Errorf("expected the RPC failure surfaced, got isError=%v text=%q", res.IsError, callText(res))
 	}
 }
+
+func TestLaunchDefaultsToReviewPhase(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ax_launch_task",
+		Arguments: map[string]any{
+			"repository": "work-coordinator",
+			"experiment": "reviewed",
+			"prompt":     "Add the retry helper.",
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	var out launchTaskOutput
+	decodeStructured(t, res.StructuredContent, &out)
+	task := fake.taskCalls[0].GetTask()
+	if got, ok := envValue(task, "AX_QWEN_REVIEW"); !ok || got != "1" {
+		t.Errorf("AX_QWEN_REVIEW = %q (set=%v), want the review phase on by default", got, ok)
+	}
+	if got, ok := envValue(task, "AX_GIT_BASE_BRANCH"); !ok || got != defaultBaseBranch {
+		t.Errorf("AX_GIT_BASE_BRANCH = %q (set=%v), want it passed so prepare can recover an empty tree", got, ok)
+	}
+	// The review reads the uncommitted tree, so committing early would starve it.
+	prompt, _ := envValue(task, "AX_QWEN_PROMPT")
+	if !strings.Contains(prompt, "Do not commit or push yet") {
+		t.Error("reviewed task prompt does not hold delivery back for the review phase")
+	}
+	if strings.Contains(prompt, "push that branch to origin") {
+		t.Error("reviewed task prompt still asks the agent to push before the review")
+	}
+	if !out.Review || !strings.Contains(out.Note, "review cycle") {
+		t.Errorf("output should advertise the review cycle, got review=%v note=%q", out.Review, out.Note)
+	}
+}
+
+func TestLaunchReviewFalseDeliversInOnePass(t *testing.T) {
+	fake := sampleTasks()
+	session, _ := newSessionWithWrites(t, fake, enabledWrites())
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ax_launch_task",
+		Arguments: map[string]any{
+			"repository": "work-coordinator",
+			"experiment": "unreviewed",
+			"prompt":     "Add the retry helper.",
+			"review":     false,
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("call: %v / %s", err, callText(res))
+	}
+	var out launchTaskOutput
+	decodeStructured(t, res.StructuredContent, &out)
+	task := fake.taskCalls[0].GetTask()
+	if got, _ := envValue(task, "AX_QWEN_REVIEW"); got != "0" {
+		t.Errorf("AX_QWEN_REVIEW = %q, want 0", got)
+	}
+	prompt, _ := envValue(task, "AX_QWEN_PROMPT")
+	if !strings.Contains(prompt, "push that branch to origin") || strings.Contains(prompt, "Do not commit or push yet") {
+		t.Error("single-pass task must keep the original commit-and-push delivery rule")
+	}
+	if out.Review || !strings.Contains(out.Note, "before declaring completion") {
+		t.Errorf("single-pass task should not advertise a review cycle: review=%v note=%q", out.Review, out.Note)
+	}
+}

@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/.." && pwd)"
 
-default_image="localhost:5001/ax-qwen-task-runner@sha256:50d5d3ea4a3a244f02b547197fc4d0e8b1223f1f7e8cd616006eb387d5534170"
+default_image="localhost:5001/ax-qwen-task-runner@sha256:e3cfbad0400fbbfd394e1208b67e990380e0a63ba2c21437d80a11db132cc922"
 image="${AX_QWEN_IMAGE:-$default_image}"
 
 # Provider profiles baked into the runner image. Model Studio models are declared
@@ -36,6 +36,11 @@ prompt_file=""
 watch=false
 dry_run=false
 serve=true
+# The review phase needs the daemon, so it is only available in serve mode.
+review=true
+# low is the single-pass review; medium fans out to reviewer subagents and measured
+# ~678k input tokens on an 84-line change before hitting its deadline.
+review_effort="${AX_QWEN_REVIEW_EFFORT:-low}"
 preview_port=""
 preview_domain="${AX_PREVIEW_DOMAIN:-norne}"
 # Must match AX_PREVIEW_HOST_PREFIX's default in the task's preview mux, or the
@@ -98,6 +103,15 @@ Options:
       --watch          Watch task status after applying it
       --serve          Run Qwen Serve (default; retained for explicit scripts)
       --headless       Run a one-shot stream-JSON session without the Web UI
+      --no-review      Skip the automated review phase. By default, once the agent
+                        finishes a fresh Qwen session reviews its uncommitted work in
+                        its own context and the agent applies those findings before
+                        committing and pushing. Needs serve mode.
+      --review         Re-enable the review phase (the default).
+      --review-effort LEVEL
+                        Review depth: low (single pass, the default), medium (parallel
+                        reviewers plus build/test - costs roughly an order of magnitude
+                        more), or high. Also settable via AX_QWEN_REVIEW_EFFORT.
       --dry-run        Print the generated manifest without applying it
   -h, --help           Show this help
 
@@ -301,6 +315,23 @@ while (($#)); do
       serve=false
       shift
       ;;
+    --review)
+      review=true
+      shift
+      ;;
+    --review-effort)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      review_effort="$2"
+      shift 2
+      ;;
+    --review-effort=*)
+      review_effort="${1#*=}"
+      shift
+      ;;
+    --no-review)
+      review=false
+      shift
+      ;;
     --dry-run)
       dry_run=true
       shift
@@ -474,14 +505,33 @@ if [[ -n "$preview_port" ]]; then
 fi
 
 git_branch="qwen/$task_name"
+case "$review_effort" in
+  low|medium|high) ;;
+  *)
+    echo "Invalid --review-effort '$review_effort': expected low, medium or high." >&2
+    exit 2
+    ;;
+esac
+if [[ "$serve" != true && "$review" == true ]]; then
+  echo "Note: --no-review is implied by --headless; the review phase needs the Qwen Serve daemon." >&2
+  review=false
+fi
+# With the review phase on the work must stay uncommitted for it to read, so
+# committing and pushing move to the phase that follows the review.
+if [[ "$review" == true ]]; then
+  delivery_note="- Do not commit or push yet. A code review of your uncommitted work runs automatically as soon as you finish, so stage everything with git add -A (new files included) and stop there.
+- In your final response, report the verification you performed and any remaining issues."
+else
+  delivery_note="- Before declaring the task complete, commit all changes on $git_branch with a meaningful commit message and push that branch to origin.
+- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues."
+fi
 prompt="$(cat <<EOF
 You are working in the norne-ai/$git_repo Git repository on branch $git_branch, created from $git_base_branch.
 
 Mandatory delivery rules:
 - Work in the checked-out repository at /workspace.
 - Complete and verify the requested work.
-- Before declaring the task complete, commit all changes on $git_branch with a meaningful commit message and push that branch to origin.
-- In your final response, report the branch name, commit SHA, verification performed, and any remaining issues.
+$delivery_note
 $preview_note
 
 User task:
@@ -508,6 +558,8 @@ manifest="$(
   AX_TASK_MODEL_SECRET_KEY="$model_secret_key" \
   AX_TASK_REASONING_EFFORT="$reasoning_effort" \
   AX_TASK_SERVE="$serve" \
+  AX_TASK_REVIEW="$review" \
+  AX_TASK_REVIEW_EFFORT="$review_effort" \
   AX_TASK_PREVIEW_TARGET="$preview_target" \
   AX_GIT_REPO="$git_repo" \
   AX_GIT_BASE_BRANCH="$git_base_branch" \
@@ -520,13 +572,38 @@ import json
 import os
 
 serve = os.environ["AX_TASK_SERVE"] == "true"
+review = os.environ["AX_TASK_REVIEW"] == "true" and serve
 prepare = r'''set -euo pipefail
 git config --global user.name "${AX_GIT_AUTHOR_NAME:-Norne Qwen}"
 git config --global user.email "${AX_GIT_AUTHOR_EMAIL:-qwen@norne.local}"
 cd /workspace
-if git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
+# Runner state and review scratch space belong to neither the commit nor the review.
+if [ -f .git/info/exclude ]; then
+  grep -qxF '.ax/' .git/info/exclude || printf '.ax/\n.qwen/\n' >>.git/info/exclude
+fi
+sync_ref=""
+if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  # Nothing was materialised. Ask the remote for its real default branch instead of
+  # trusting the requested one: norne-ai/experiments has no main at all.
+  for ref in "${AX_GIT_BASE_BRANCH:-}" "$(git -c core.askPass=/usr/local/bin/ax-git-askpass ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/{sub("refs/heads/","",$2); print $2; exit}')"; do
+    [ -n "$ref" ] || continue
+    if git -c core.askPass=/usr/local/bin/ax-git-askpass fetch -q origin "$ref" 2>/dev/null; then
+      sync_ref="$ref"
+      break
+    fi
+  done
+fi
+if [ -n "$sync_ref" ]; then
+  git checkout -q -B "$AX_GIT_BRANCH" FETCH_HEAD
+elif git show-ref --verify --quiet "refs/heads/$AX_GIT_BRANCH"; then
   git switch "$AX_GIT_BRANCH"
 else
+  # An unreachable base branch is a legitimate start state, not a failure: the task
+  # creates the history. Aborting would also take the Web Shell down, because the
+  # daemon is exec'd after this script.
+  if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    echo "ax: /workspace has no commits and no base branch was reachable; starting from an empty tree" >&2
+  fi
   git switch -c "$AX_GIT_BRANCH"
 fi
 '''
@@ -564,7 +641,11 @@ env = [
     {"name": "OPENAI_BASE_URL", "value": os.environ["AX_TASK_ENDPOINT"]},
     {"name": "OPENAI_MODEL", "value": os.environ["AX_TASK_MODEL"]},
     {"name": "AX_GIT_BRANCH", "value": os.environ["AX_GIT_BRANCH"]},
+    {"name": "AX_GIT_BASE_BRANCH", "value": os.environ["AX_GIT_BASE_BRANCH"]},
+    {"name": "AX_QWEN_REVIEW", "value": "1" if review else "0"},
 ]
+if review:
+    env.append({"name": "AX_QWEN_REVIEW_EFFORT", "value": os.environ["AX_TASK_REVIEW_EFFORT"]})
 
 # The task's preview mux only fronts the daemon when AX_PREVIEW_TARGET is set, so
 # an unset port here means the hostname routes to the Web Shell instead.
@@ -668,6 +749,7 @@ Reasoning effort: ${reasoning_effort:-default}
 Repository: norne-ai/$git_repo
 Base branch: $git_base_branch
 Git branch: $git_branch
+Review phase: $(if [[ "$review" == true ]]; then echo "enabled ($review_effort effort, fresh session)"; else echo disabled; fi)
 Preview app: ${preview_url:-not requested (pass --preview)}
 
 Watch status:
