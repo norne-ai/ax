@@ -1,8 +1,6 @@
 # Binaries
 bin/
 /tmp/
-# Staged build inputs that are not in git, e.g. the forked Web Shell dist.
-/.build/
 *.exe
 *.test
 /ax

@@ -21,15 +21,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
-	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -152,8 +147,6 @@ func main() {
 		err = runDelete(serverURL, atespace, cleanArgs)
 	case "ssh":
 		err = runSSH(serverURL, atespace, kubeContext, cleanArgs)
-	case "qwen-ui":
-		err = runQwenUI(serverURL, atespace, kubeContext, cleanArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		printUsage()
@@ -188,7 +181,6 @@ Available Commands:
   describe model <name>   Show detailed information about a model
   watch task <name>       Stream live status and condition updates for a task
   ssh <task-name> [-- cmd] Run a command or shell inside the running task container
-  qwen-ui <task-name>      Open a browser proxy to a task's Qwen Web Shell
   suspend task <name>     Suspend execution of a task and checkpoint state
   resume task <name>      Resume execution of a suspended task
   delete task <name>      Delete a task
@@ -1235,131 +1227,4 @@ func runSSH(serverURL, atespace, kubeContext string, args []string) error {
 	}
 
 	return nil
-}
-
-func runQwenUI(serverURL, atespace, kubeContext string, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: ax qwen-ui <task-name> [--host <address>] [--port <port>]")
-	}
-
-	taskName := args[0]
-	listenHost := "127.0.0.1"
-	localPort := 8787
-	for i := 1; i < len(args); i++ {
-		switch {
-		case args[i] == "--host":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--host requires a value")
-			}
-			listenHost = strings.TrimSpace(args[i+1])
-			if listenHost == "" {
-				return fmt.Errorf("--host cannot be empty")
-			}
-			i++
-		case strings.HasPrefix(args[i], "--host="):
-			listenHost = strings.TrimSpace(strings.TrimPrefix(args[i], "--host="))
-			if listenHost == "" {
-				return fmt.Errorf("--host cannot be empty")
-			}
-		case args[i] == "--port":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--port requires a value")
-			}
-			p, err := strconv.Atoi(args[i+1])
-			if err != nil || p < 1 || p > 65535 {
-				return fmt.Errorf("invalid port %q", args[i+1])
-			}
-			localPort = p
-			i++
-		case strings.HasPrefix(args[i], "--port="):
-			value := strings.TrimPrefix(args[i], "--port=")
-			p, err := strconv.Atoi(value)
-			if err != nil || p < 1 || p > 65535 {
-				return fmt.Errorf("invalid port %q", value)
-			}
-			localPort = p
-		default:
-			return fmt.Errorf("unknown qwen-ui option %q", args[i])
-		}
-	}
-
-	client, conn, err := getAXClient(serverURL)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	lookupCtx, cancelLookup := context.WithTimeout(context.Background(), 10*time.Second)
-	task, err := client.GetTask(lookupCtx, &v1alpha1.GetTaskRequest{Atespace: atespace, Name: taskName})
-	cancelLookup()
-	if err != nil {
-		return fmt.Errorf("fetching task %q: %w", taskName, err)
-	}
-	if task.GetStatus().GetPhase() != "Running" {
-		return fmt.Errorf("task %q is in phase %q (must be Running)", taskName, task.GetStatus().GetPhase())
-	}
-	actor := task.GetStatus().GetActor()
-	if actor == "" {
-		return fmt.Errorf("task %q has no actor assigned", taskName)
-	}
-	taskAtespace := task.GetMetadata().GetAtespace()
-	if taskAtespace == "" {
-		taskAtespace = atespace
-	}
-	targetActor := fmt.Sprintf("%s/%s", taskAtespace, actor)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	routerPort, cleanup, err := tunnel.PortForward(ctx, kubeContext, "ate-system", "svc/atenet-router", 80)
-	if err != nil {
-		return fmt.Errorf("establishing port-forward to atenet-router: %w", err)
-	}
-	defer cleanup()
-
-	target, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", routerPort))
-	if err != nil {
-		return err
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	originalDirector := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		originalDirector(r)
-		r.Header.Set("ate-target-actor", targetActor)
-	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
-		http.Error(w, "Qwen task proxy unavailable: "+proxyErr.Error(), http.StatusBadGateway)
-	}
-
-	listenAddr := net.JoinHostPort(listenHost, strconv.Itoa(localPort))
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", listenAddr, err)
-	}
-	server := &http.Server{Handler: proxy}
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.Serve(listener)
-	}()
-
-	displayHost := listenHost
-	if listenHost == "0.0.0.0" || listenHost == "::" {
-		if hostname, hostnameErr := os.Hostname(); hostnameErr == nil && hostname != "" {
-			displayHost = hostname
-		}
-		fmt.Fprintln(os.Stderr, "Warning: the Qwen Web Shell grants code-execution access to anyone who can reach this port.")
-	}
-	uiURL := fmt.Sprintf("http://%s", net.JoinHostPort(displayHost, strconv.Itoa(localPort)))
-	fmt.Printf("Qwen Web Shell for %s is available at:\n  %s\n\nPress Ctrl-C to stop the proxy.\n", targetActor, uiURL)
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
-	case serveErr := <-errCh:
-		if errors.Is(serveErr, http.ErrServerClosed) {
-			return nil
-		}
-		return serveErr
-	}
 }

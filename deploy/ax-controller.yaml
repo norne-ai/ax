@@ -79,8 +79,6 @@ spec:
           env:
             - name: ATENET_ROUTER_ADDR
               value: "atenet-router.ate-system.svc.cluster.local:80"
-            - name: AX_SNAPSHOTS_BUCKET
-              value: "gs://ate-snapshots/ax/"
           resources:
             requests:
               cpu: "100m"
