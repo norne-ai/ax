@@ -62,6 +62,11 @@ type Config struct {
 	Workspaces []*v1alpha1.Workspace
 	// OnCommandExit, when set, is called once the task command has exited.
 	OnCommandExit func(CommandExit)
+	// ExitOnCommandDone ends Run as soon as the task command finishes, so a
+	// headless task's container exit status can mirror the command's own.
+	// False — the default every interactive task relies on — keeps the
+	// sandbox up and inspectable after the command exits.
+	ExitOnCommandDone bool
 }
 
 // mount pairs one workspace binding from the task spec with the Workspace
@@ -196,6 +201,13 @@ func Run(ctx context.Context, cfg Config) error {
 	select {
 	case err := <-exited:
 		reportExit(cfg, cmd, err)
+		if cfg.ExitOnCommandDone {
+			// Headless lifecycle: the command *is* the task. Return so the
+			// container's exit status can mirror the command's, and the
+			// platform records a terminal phase instead of holding an actor
+			// that serves nothing.
+			return nil
+		}
 		// Keep the sandbox up and inspectable until told to stop.
 		<-ctx.Done()
 	case <-ctx.Done():

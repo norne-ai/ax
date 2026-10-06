@@ -72,11 +72,30 @@ func main() {
 	}
 	cfg.Workspaces = workspaces
 
+	// Headless task lifecycle: with AX_EXIT_ON_COMMAND_EXIT=1 in the task's
+	// environment, the command finishing ends the container, exiting with
+	// the command's own status so the platform records a terminal phase.
+	// Interactive tasks leave this unset and keep the sandbox up after a
+	// stray child exits, which is what `ax ssh` recovery depends on.
+	var command *runner.CommandExit
+	cfg.OnCommandExit = func(e runner.CommandExit) { command = &e }
+	cfg.ExitOnCommandDone = os.Getenv("AX_EXIT_ON_COMMAND_EXIT") == "1"
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := runner.Run(ctx, cfg); err != nil {
 		fatal(err)
+	}
+	if cfg.ExitOnCommandDone && command != nil && ctx.Err() == nil {
+		code := command.ExitCode
+		if code < 0 {
+			// Killed by a signal: nonzero by definition, and 1 is what a
+			// shell uses for the same shape of death.
+			code = 1
+		}
+		slog.Info("exiting with the task command's status", "exitCode", code, "pid", command.Pid)
+		os.Exit(code)
 	}
 }
 
